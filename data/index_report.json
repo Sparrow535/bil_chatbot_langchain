@@ -1,0 +1,11 @@
+{
+  "indexed_pages_and_docs": 196,
+  "indexed_chunks": 1491,
+  "batch_size": 64,
+  "vectorstore_dir": "data\\faiss_index",
+  "forms_catalog_count": 43,
+  "notes": [
+    "Embeddings generated in batches to avoid OpenAI token limits.",
+    "Each chunk is tagged with section_type metadata."
+  ]
+}

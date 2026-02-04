@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Floating Chatbot UI</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+
+    <div id="chat-widget">
+        <button id="chat-fab" aria-label="Open chat">
+            <span class="fab-icon" aria-hidden="true">🤖</span>
+        </button>
+
+        <section id="chat-panel" class="hidden" role="dialog" aria-label="AI Chatbot">
+            <header class="chat-header">
+                <div class="bot-id">
+                    <div class="bot-logo"><img src="./assets/logo.svg" alt="logo"></div>
+                    <div class="bot-meta">
+                        <div class="bot-name">NORBU <span>AI Assistant</span></div>
+                        <div class="bot-status" id="bot-status">Online</div>
+                    </div>
+                </div>
+                <button id="chat-close" class="icon-btn" aria-label="Close chat">✕</button>
+            </header>
+
+            <div class="chat-intro">
+                <div class="intro-bubble">👋 Hi! I’m your AI assistant. Ask me anything.</div>
+            </div>
+
+            <main id="chat-messages" class="chat-messages" aria-live="polite"></main>
+
+            <footer class="chat-composer">
+                <!-- NORMAL MODE (PILL like Messenger) -->
+                <div id="composer-normal" class="composer-pill">
+                    <input id="chat-input" type="text" placeholder="Ask a question..." autocomplete="off" />
+
+                    <button id="mic-btn" class="pill-icon pill-mic" type="button" aria-label="Voice message">
+                        <img src="./assets/mic.svg" alt="microphone icon" class="pill-svg" />
+                    </button>
+
+                    <button id="send-btn" class="pill-icon pill-send" type="button" aria-label="Send">
+                        <!-- nicer send icon (optional) -->
+                        <svg class="pill-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M3 11.5 21 3l-8.5 18-2.7-6.3L3 11.5Zm8 2.2 1.6 3.7L17.8 6.2 11 13.7Z" />
+                        </svg>
+                    </button>
+                </div>
+
+
+                <!-- RECORDING MODE (Messenger-like) -->
+                <div id="composer-recording" class="recording-row hidden" aria-live="polite">
+                    <button id="rec-cancel" class="rec-action ghost" type="button"
+                        aria-label="Cancel recording">✕</button>
+
+                    <div class="rec-visual">
+                        <div class="rec-dot"></div>
+                        <div class="sound-bars" aria-hidden="true">
+                            <span></span><span></span><span></span><span></span><span></span>
+                            <span></span><span></span><span></span><span></span><span></span>
+                            <span></span><span></span><span></span><span></span><span></span>
+                            <span></span><span></span><span></span><span></span><span></span>
+                        </div>
+                        <div class="rec-time" id="rec-timer">00:00</div>
+                    </div>
+
+                    <button id="rec-send" class="rec-action primary" type="button"
+                        aria-label="Send recording">➤</button>
+                </div>
+
+                <div class="hint" id="hint"></div>
+            </footer>
+        </section>
+    </div>
+
+    <script src="script.js" defer></script>
+</body>
+
+</html>Q

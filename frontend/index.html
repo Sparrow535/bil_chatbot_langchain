@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Floating Chatbot UI</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+
+    <div id="chat-widget">
+        <div id="chat-teaser" class="chat-teaser" role="status" aria-live="polite">
+            <button id="teaser-close" class="teaser-close" aria-label="Dismiss">×</button>
+            <div class="teaser-row">
+                <div class="teaser-avatar">
+                    <img src="./assets/logo.svg" alt="BIL logo">
+                </div>
+                <div class="teaser-content">
+                    <div class="teaser-title">Hi! I’m Norbu. How can I help you today?</div>
+                    <div class="teaser-subtitle">Norbu · AI Agent · Just now</div>
+                </div>
+            </div>
+        </div>
+
+        <button id="chat-fab" aria-label="Open chat">
+            <img id="fab-icon" class="fab-image" src="./assets/popup.svg" alt="Open chat">
+        </button>
+
+        <section id="chat-panel" class="hidden" role="dialog" aria-label="AI Chatbot">
+            <header class="chat-header">
+                <div class="bot-id">
+                    <div class="bot-logo"><img src="./assets/logo.svg" alt="logo"></div>
+                    <div class="bot-meta">
+                        <div class="bot-name">NORBU <span>AI Assistant</span></div>
+                        <div class="bot-status" id="bot-status">Online</div>
+                    </div>
+                </div>
+                <button id="chat-close" class="icon-btn" aria-label="Close chat">✕</button>
+            </header>
+
+            <main id="chat-messages" class="chat-messages" aria-live="polite"></main>
+
+            <footer class="chat-composer">
+                <!-- NORMAL MODE -->
+                <div id="composer-normal" class="composer-pill">
+                    <input id="chat-input" type="text" placeholder="Ask a question..." autocomplete="off" />
+
+                    <button id="mic-btn" class="pill-icon pill-mic" type="button" aria-label="Voice message">
+                        <img src="./assets/mic.svg" alt="microphone icon" class="pill-svg" />
+                    </button>
+
+                    <button id="send-btn" class="pill-icon pill-send" type="button" aria-label="Send">
+                        <svg class="pill-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M3 11.5 21 3l-8.5 18-2.7-6.3L3 11.5Zm8 2.2 1.6 3.7L17.8 6.2 11 13.7Z" />
+                        </svg>
+                    </button>
+                </div>
+
+                <!-- RECORDING MODE -->
+                <div id="composer-recording" class="recording-row hidden" aria-live="polite">
+                    <button id="rec-cancel" class="rec-action ghost" type="button"
+                        aria-label="Cancel recording">✕</button>
+
+                    <div class="rec-visual">
+                        <div class="rec-dot"></div>
+                        <div class="sound-bars" aria-hidden="true">
+                            <span></span><span></span><span></span><span></span><span></span>
+                            <span></span><span></span><span></span><span></span><span></span>
+                            <span></span><span></span><span></span><span></span><span></span>
+                            <span></span><span></span><span></span><span></span><span></span>
+                        </div>
+                        <div class="rec-time" id="rec-timer">00:00</div>
+                    </div>
+
+                    <button id="rec-send" class="rec-action primary" type="button"
+                        aria-label="Send recording">➤</button>
+                </div>
+
+                <div class="hint" id="hint"></div>
+            </footer>
+        </section>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="scripts.js" defer></script>
+</body>
+
+</html>
