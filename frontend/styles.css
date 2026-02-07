@@ -825,9 +825,10 @@ select {
     position: fixed;
     right: 10px;
     left: 10px;
-    bottom: 82px;
+    top: 10px;
+    bottom: 110px;
     width: auto;
-    height: 70vh;
+    height: auto;
     border-radius: 16px;
   }
   .chat-teaser {
