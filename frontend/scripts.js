@@ -811,15 +811,31 @@
   // =====================
   // Mobile keyboard handling (attach panel to keyboard)
   // =====================
+  const isIOS = /iP(ad|hone|od)/.test(navigator.userAgent);
   let baseViewportHeight = 0;
   let baseInnerHeight = 0;
+  let baseDocHeight = 0;
   let kbCloseTimer = null;
+  const KB_THRESHOLD = 60;
 
-  function updateBaseHeights() {
+  function updateBaseHeights(force = false) {
     const vv = window.visualViewport;
     const currentVVH = vv ? vv.height : 0;
-    baseViewportHeight = Math.max(baseViewportHeight, currentVVH || 0);
-    baseInnerHeight = Math.max(baseInnerHeight, window.innerHeight || 0);
+    const currentInner = window.innerHeight || 0;
+    const currentDoc = document.documentElement
+      ? document.documentElement.clientHeight || 0
+      : 0;
+
+    if (force || !baseViewportHeight) baseViewportHeight = currentVVH || currentInner;
+    if (force || !baseInnerHeight) baseInnerHeight = currentInner;
+    if (force || !baseDocHeight) baseDocHeight = currentDoc;
+
+    // If keyboard is closed, refresh baselines to handle orientation changes
+    if (!widget.classList.contains("kb-open")) {
+      if (currentVVH) baseViewportHeight = currentVVH;
+      if (currentInner) baseInnerHeight = currentInner;
+      if (currentDoc) baseDocHeight = currentDoc;
+    }
   }
 
   function updateKeyboardOffset() {
@@ -829,21 +845,34 @@
     let offset = 0;
     if (window.visualViewport) {
       const vv = window.visualViewport;
-      const base = baseViewportHeight || vv.height || window.innerHeight;
-      const current = vv.height || window.innerHeight;
-      const delta = Math.max(0, base - current);
+      const currentVVH = vv.height || window.innerHeight;
+      const base = baseViewportHeight || currentVVH || window.innerHeight;
+      const delta = Math.max(0, base - currentVVH);
       const safeDelta = Math.max(
         0,
-        window.innerHeight - (vv.height || 0) - (vv.offsetTop || 0),
+        window.innerHeight - (currentVVH || 0) - (vv.offsetTop || 0),
       );
-      offset = Math.max(delta, safeDelta);
+      const currentDoc = document.documentElement
+        ? document.documentElement.clientHeight || 0
+        : 0;
+      const deltaDoc = Math.max(0, (baseDocHeight || currentDoc) - currentDoc);
+      offset = Math.max(delta, safeDelta, deltaDoc);
+
+      // iOS sometimes reports small deltas; apply threshold
+      if (isIOS && offset < KB_THRESHOLD && delta > KB_THRESHOLD) {
+        offset = delta;
+      }
     } else {
       const base = baseInnerHeight || window.innerHeight;
-      offset = Math.max(0, base - window.innerHeight);
+      const currentDoc = document.documentElement
+        ? document.documentElement.clientHeight || 0
+        : 0;
+      const deltaDoc = Math.max(0, (baseDocHeight || currentDoc) - currentDoc);
+      offset = Math.max(0, base - window.innerHeight, deltaDoc);
     }
 
     widget.style.setProperty("--kb-offset", `${offset}px`);
-    if (offset > 0) {
+    if (offset > KB_THRESHOLD) {
       if (kbCloseTimer) {
         clearTimeout(kbCloseTimer);
         kbCloseTimer = null;
@@ -857,6 +886,7 @@
     }
   }
 
+  updateBaseHeights(true);
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", updateKeyboardOffset);
     window.visualViewport.addEventListener("scroll", updateKeyboardOffset);
