@@ -854,6 +854,10 @@ select {
   #chat-widget.kb-open #chat-panel {
     bottom: calc(8px + var(--kb-offset, 0px) + env(safe-area-inset-bottom));
   }
+  #chat-widget.kb-open #chat-fab,
+  #chat-widget.kb-open .chat-teaser {
+    display: none !important;
+  }
   .chat-teaser {
     right: 6px;
     width: 230px;

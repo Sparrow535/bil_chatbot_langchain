@@ -813,6 +813,7 @@
   // =====================
   let baseViewportHeight = 0;
   let baseInnerHeight = 0;
+  let kbCloseTimer = null;
 
   function updateBaseHeights() {
     const vv = window.visualViewport;
@@ -842,7 +843,18 @@
     }
 
     widget.style.setProperty("--kb-offset", `${offset}px`);
-    widget.classList.toggle("kb-open", offset > 0);
+    if (offset > 0) {
+      if (kbCloseTimer) {
+        clearTimeout(kbCloseTimer);
+        kbCloseTimer = null;
+      }
+      widget.classList.add("kb-open");
+    } else {
+      if (kbCloseTimer) clearTimeout(kbCloseTimer);
+      kbCloseTimer = setTimeout(() => {
+        widget.classList.remove("kb-open");
+      }, 180);
+    }
   }
 
   if (window.visualViewport) {
