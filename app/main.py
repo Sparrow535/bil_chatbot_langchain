@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.schemas import ChatRequest, BotResponse, DownloadItem, TranscribeResponse
 from app.agent import run_agent
+from app.incremental import start_incremental_loop
 from openai import OpenAI
 import tempfile
 import os
@@ -19,6 +20,7 @@ app = FastAPI(title="BIL LangChain Chatbot API", version="1.0.0")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SESSION_HISTORY = defaultdict(lambda: deque(maxlen=12))
+_incremental_started = False
 
 
 app.add_middleware(
@@ -28,6 +30,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def _startup_tasks():
+    global _incremental_started
+    if not _incremental_started:
+        start_incremental_loop()
+        _incremental_started = True
 
 @app.get("/health")
 def health():

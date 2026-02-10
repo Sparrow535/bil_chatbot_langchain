@@ -1,11 +1,21 @@
-document.addEventListener("DOMContentLoaded", () => {
+(() => {
+  let __chatbotInitialized = false;
+
+  function initChatbot() {
+    if (__chatbotInitialized) return;
+    __chatbotInitialized = true;
   // =====================
   // CONFIG
   // =====================
-  const API_URL = "/chat";
-  const STT_URL = "/stt";
-  const BOT_NAME = "Norbu";
-  const BOT_LOGO = "./assets/logo.svg";
+  const GLOBAL_CONFIG = window.BILChatbotConfig || {};
+  const API_BASE = GLOBAL_CONFIG.apiBase || "";
+  const ASSET_BASE = (GLOBAL_CONFIG.assetBase || "").replace(/\/$/, "");
+  const API_URL = GLOBAL_CONFIG.apiUrl || (API_BASE ? `${API_BASE}/chat` : "/chat");
+  const STT_URL = GLOBAL_CONFIG.sttUrl || (API_BASE ? `${API_BASE}/stt` : "/stt");
+  const BOT_NAME = GLOBAL_CONFIG.botName || "Norbu";
+  const BOT_LOGO =
+    GLOBAL_CONFIG.botLogo ||
+    (ASSET_BASE ? `${ASSET_BASE}/assets/logo.svg` : "./assets/logo.svg");
 
   // Typewriter speed
   const TYPE_MIN_DELAY = 6;
@@ -72,8 +82,12 @@ document.addEventListener("DOMContentLoaded", () => {
   // UI helpers
   // =====================
   const TEASER_DELAY_MS = 2500;
-  const FAB_OPEN_ICON = "./assets/popup.svg";
-  const FAB_CLOSE_ICON = "./assets/down.svg";
+  const FAB_OPEN_ICON =
+    GLOBAL_CONFIG.fabOpenIcon ||
+    (ASSET_BASE ? `${ASSET_BASE}/assets/popup.svg` : "./assets/popup.svg");
+  const FAB_CLOSE_ICON =
+    GLOBAL_CONFIG.fabCloseIcon ||
+    (ASSET_BASE ? `${ASSET_BASE}/assets/down.svg` : "./assets/down.svg");
   let teaserTimer = null;
 
   function scheduleTeaser() {
@@ -800,4 +814,13 @@ document.addEventListener("DOMContentLoaded", () => {
       teaser.classList.add("hidden");
     });
   }
-});
+  }
+
+  window.BILChatbotInit = initChatbot;
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => initChatbot());
+  } else {
+    initChatbot();
+  }
+})();

@@ -1,0 +1,110 @@
+{
+  "urls": {
+    "https://www.bil.bt": {
+      "hash": "ff404bf205fc56128c1552adc4c32acc0a2ab435ed2716be70dde6ce285696ce",
+      "last_crawled": 1770744308
+    },
+    "https://www.bil.bt/loans": {
+      "hash": "6e805955bd6d0fd7960c0a29b56c792aab2e81bc38e1752bbb873ef6a0ef5f52",
+      "last_crawled": 1770744309
+    },
+    "https://www.bil.bt/insurance": {
+      "hash": "3d0cd1d218132e2f1aecdc39a8836a9578d6d48d29a426078bbc1e035685dd53",
+      "last_crawled": 1770744309
+    },
+    "https://www.bil.bt/announcements": {
+      "hash": "7941597781837976a8c358159f73805644284b149bbb4210b03fdcf2326fc297",
+      "last_crawled": 1770744309
+    },
+    "https://www.bil.bt/e-services": {
+      "hash": "de27586d1115b648cdce6a8a8145d057284543f3cc0489aaea955d437ea4ce2f",
+      "last_crawled": 1770744310
+    },
+    "https://www.bil.bt/gmc/insurance": {
+      "hash": "576f313b4240eb45997737c9a530a0c77cf80d3c4fb1d0dd43221bb6ae59af62",
+      "last_crawled": 1770744310
+    },
+    "https://www.bil.bt/about-us/organogram": {
+      "hash": "f1fcb61259db5e68e5a1bf2ea4a9e4e5ab7151e4736af5326333e006652e37ce",
+      "last_crawled": 1770744310
+    },
+    "https://www.bil.bt/document/uploads/BIL-Insurance-Handbook-20August2024.pdf": {
+      "hash": "8edf11384f5132d281ce5766aa198de2e5652de03215a55f8c6d27b01fcffc9e",
+      "last_crawled": 1770744312,
+      "etag": "\"6f1b71-620194b0e8c7b\"",
+      "last_modified": "Tue, 20 Aug 2024 08:34:25 GMT"
+    },
+    "https://www.bil.bt/announcements/tender-notice": {
+      "hash": "46adfacc9d6244a69e554f69cd4b9f31f7c9d6b06bd4a52cfbdde83b39c643b1",
+      "last_crawled": 1770744312
+    },
+    "https://www.bil.bt/help-and-support/share-your-feedback": {
+      "hash": "999e1c8852175f33d271031a4140aed0b892c06ff3c2e5b469ad852baea85a93",
+      "last_crawled": 1770744312
+    },
+    "https://www.bil.bt/about-us/company-profile": {
+      "hash": "e0a59cf84231594a3ae8b5f199ca46af550162d1b50c8f9f265e7f4ef8db313b",
+      "last_crawled": 1770744313
+    },
+    "https://www.bil.bt/insurance/liability-insurance": {
+      "hash": "92475ba38c1ffc4771d1a4a982e40779a2bba8f68704c9cfbc823346d999ffa1",
+      "last_crawled": 1770744313
+    },
+    "https://www.bil.bt/insurance/miscellaneous-insurance": {
+      "hash": "5fe1b6e1a3e929cb5ce4306a2720ad5241ef027cc4e48b639fab6ae676e715ad",
+      "last_crawled": 1770744314
+    },
+    "https://www.bil.bt/insurance/aviation-insurance": {
+      "hash": "c8d8d8827d5d6666a04c95367335e562a38f6057bb025b5b554fa3ba36ee1749",
+      "last_crawled": 1770744314
+    },
+    "https://www.bil.bt/insurance/fire-insurance": {
+      "hash": "848bdaae2a47534b121dbc31ad8cefff95b6f0ac8f867b86bfaddf3e573ed7f5",
+      "last_crawled": 1770744314
+    },
+    "https://www.bil.bt/insurance/motor-insurance": {
+      "hash": "4147bfb7ef296329dd58aa5afa974c6465fc1ee91cb0749ed63df4544c9ddd45",
+      "last_crawled": 1770744314
+    },
+    "https://www.bil.bt/ppf-gf": {
+      "hash": "9437c3e581fd2f669d92a29b2d19993b7d762c9bab958b6fe613402d8393560c",
+      "last_crawled": 1770744315
+    },
+    "https://www.bil.bt/about-us/information-security": {
+      "hash": "3b70396af8c32cfef0b0c8b878fd76437248b8438d67551795103e834549c114",
+      "last_crawled": 1770744316
+    },
+    "https://www.bil.bt/claim": {
+      "hash": "ce6a94a1223e40453880a55ea668becaac8b7345f6abe73f4107918988ded3ce",
+      "last_crawled": 1770744316
+    },
+    "https://www.bil.bt/unclaimed-dividend": {
+      "hash": "f1b4a8f93371481265d486c856118260ce0f6562a14bf65700f0bf3c4b04fe21",
+      "last_crawled": 1770744317
+    },
+    "https://www.bil.bt/insurance/travel-insurance": {
+      "hash": "79367806587eed908c9bf0fceda4006868314e0aa064a8f03331453f4d798909",
+      "last_crawled": 1770744317
+    },
+    "https://www.bil.bt/privacy-policy": {
+      "hash": "73a1db7b97e800998f43152c09efa02306a0fca35760efd7d95da2c7b6d4d43b",
+      "last_crawled": 1770744317
+    },
+    "https://www.bil.bt/about-us/management-team": {
+      "hash": "2109509bc3f4d84ee5c2d6cb934eeae45f3f80c4c0e7cbe7f3923c762b0592db",
+      "last_crawled": 1770744318
+    },
+    "https://www.bil.bt/about-us/board-of-directors": {
+      "hash": "530982a0af3dc18b6482a342916c2b12a2db817863aae2da81806ee45c24550f",
+      "last_crawled": 1770744318
+    },
+    "https://www.bil.bt/insurance/engineering": {
+      "hash": "64149ad74e4a0e47883c9da95b0b9c86a694c39cb77d5dd20a52323c8421be52",
+      "last_crawled": 1770744318
+    },
+    "https://www.bil.bt/insurance/marine-insurance": {
+      "hash": "249dabb23ebac85b8f12a8715c9718354c4fe6502f6eee71f01df5cdae844c1c",
+      "last_crawled": 1770744318
+    }
+  }
+}

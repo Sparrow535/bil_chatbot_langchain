@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple
 import re
 from urllib.parse import unquote
 import random
+import threading
 
 from langchain.tools import tool
 from app.config import settings
@@ -89,13 +90,22 @@ def _best_matches(query: str, forms: List[Dict[str, Any]], top_k: int = TOP_K) -
 
 _vectorstore = None
 _forms = None
+_resource_lock = threading.RLock()
 
 def init_resources():
     global _forms, _vectorstore
-    if _forms is None:
-        _forms = _load_forms()
-    if _vectorstore is None:
+    with _resource_lock:
+        if _forms is None:
+            _forms = _load_forms()
+        if _vectorstore is None:
+            _vectorstore = load_vectorstore()
+
+def refresh_vectorstore() -> None:
+    """Reload vectorstore + forms safely after incremental indexing."""
+    global _vectorstore, _forms
+    with _resource_lock:
         _vectorstore = load_vectorstore()
+        _forms = _load_forms()
 
 @tool
 def bil_get_forms(query: str) -> str:
@@ -104,11 +114,12 @@ def bil_get_forms(query: str) -> str:
     Returns JSON string with matching forms and URLs (from forms.json only).
     """
     init_resources()
-
     if not looks_like_form_request(query):
         return json.dumps({"matches": [], "found": False}, ensure_ascii=False)
 
-    matches = _best_matches(query, _forms or [], top_k=TOP_K)
+    with _resource_lock:
+        forms = list(_forms or [])
+    matches = _best_matches(query, forms, top_k=TOP_K)
 
     return json.dumps(
         {
@@ -135,9 +146,11 @@ def bil_retrieve_context(query: str) -> str:
       { "chunks": [{"content": "...", "source": "...", "title": "...", "score": 0.0..1.0}], "found": true/false }
     """
     init_resources()
+    with _resource_lock:
+        vectorstore = _vectorstore
 
     # Use raw scores and normalize to 0..1 to avoid invalid relevance warnings
-    docs = _vectorstore.similarity_search_with_score(query, k=settings.top_k)
+    docs = vectorstore.similarity_search_with_score(query, k=settings.top_k)
 
     def _to_similarity(score: float) -> float:
         try:
