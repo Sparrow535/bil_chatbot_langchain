@@ -3,7 +3,6 @@
 
   function initChatbot() {
     if (__chatbotInitialized) return;
-    __chatbotInitialized = true;
   // =====================
   // CONFIG
   // =====================
@@ -51,7 +50,7 @@
   const recCancelBtn = byId("rec-cancel");
   const recSendBtn = byId("rec-send");
 
-  // Validate required nodes
+  // Validate required nodes (retry if not ready yet)
   const required = {
     widget,
     fab,
@@ -68,9 +67,13 @@
     recCancelBtn,
     recSendBtn,
   };
-  for (const [k, v] of Object.entries(required)) {
-    if (!v) console.error(`Missing element: ${k}`);
+  const missing = Object.entries(required).filter(([, v]) => !v);
+  if (missing.length) {
+    missing.forEach(([k]) => console.warn(`Chatbot: missing element ${k}`));
+    setTimeout(initChatbot, 200);
+    return;
   }
+  __chatbotInitialized = true;
 
   // =====================
   // SESSION + HISTORY
