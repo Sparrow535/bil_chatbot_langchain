@@ -793,25 +793,6 @@
   });
 
   // =====================
-  // Open/close events
-  // =====================
-  fab.addEventListener("click", () => {
-    const isOpen = !panel.classList.contains("hidden");
-    togglePanel(!isOpen);
-  });
-  closeBtn.addEventListener("click", () => togglePanel(false));
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") togglePanel(false);
-  });
-
-  if (teaserClose && teaser) {
-    teaserClose.addEventListener("click", () => {
-      teaser.classList.add("hidden");
-    });
-  }
-  }
-
-  // =====================
   // Mobile keyboard handling (attach panel to keyboard)
   // =====================
   const isIOS = /iP(ad|hone|od)/.test(navigator.userAgent);
@@ -834,7 +815,7 @@
     if (force || !baseDocHeight) baseDocHeight = currentDoc;
 
     // If keyboard is closed, refresh baselines to handle orientation changes
-    if (!widget.classList.contains("kb-open")) {
+    if (!widget || !widget.classList.contains("kb-open")) {
       if (currentVVH) baseViewportHeight = currentVVH;
       if (currentInner) baseInnerHeight = currentInner;
       if (currentDoc) baseDocHeight = currentDoc;
@@ -897,6 +878,25 @@
   window.addEventListener("resize", updateKeyboardOffset);
   document.addEventListener("focusin", updateKeyboardOffset);
   document.addEventListener("focusout", updateKeyboardOffset);
+
+  // =====================
+  // Open/close events
+  // =====================
+  fab.addEventListener("click", () => {
+    const isOpen = !panel.classList.contains("hidden");
+    togglePanel(!isOpen);
+  });
+  closeBtn.addEventListener("click", () => togglePanel(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") togglePanel(false);
+  });
+
+  if (teaserClose && teaser) {
+    teaserClose.addEventListener("click", () => {
+      teaser.classList.add("hidden");
+    });
+  }
+  }
 
   window.BILChatbotInit = initChatbot;
 
