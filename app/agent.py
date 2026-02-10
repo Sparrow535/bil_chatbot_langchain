@@ -348,6 +348,7 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     data.setdefault("intent", "not_found")
     data.setdefault("answer", "")
     data.setdefault("answer_md", "")
+    data.setdefault("client_delay_ms", None)
 
     data["answer"] = strip_urls(str(data.get("answer", "")))
 
@@ -466,12 +467,15 @@ prompt = ChatPromptTemplate.from_messages(
 
 
 def _llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.chat_model,
-        api_key=settings.openai_api_key,
-        temperature=0.2,
-        model_kwargs={"response_format": {"type": "json_object"}},
-    )
+    kwargs = {
+        "model": settings.chat_model,
+        "api_key": settings.openai_api_key,
+        "model_kwargs": {"response_format": {"type": "json_object"}},
+    }
+    # Some models (e.g., gpt-5-nano) only allow default temperature
+    if not str(settings.chat_model).startswith("gpt-5"):
+        kwargs["temperature"] = 0.2
+    return ChatOpenAI(**kwargs)
 
 
 # =========================
@@ -499,6 +503,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "downloads": [],
             "sources": [],
             "confidence": "high",
+            "client_delay_ms": 1500,
         }, user_query=q)
 
     if social == "thanks":
@@ -509,6 +514,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "downloads": [],
             "sources": [],
             "confidence": "high",
+            "client_delay_ms": 1500,
         }, user_query=q)
 
     if social == "farewell":
@@ -519,6 +525,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "downloads": [],
             "sources": [],
             "confidence": "high",
+            "client_delay_ms": 1500,
         }, user_query=q)
 
     # 1) Intent hint
@@ -593,6 +600,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "downloads": [],
             "sources": [],
             "confidence": "high",
+            "client_delay_ms": 1500,
         }, user_query=q)
 
     # 4) BIL Query: retrieve context + ask LLM

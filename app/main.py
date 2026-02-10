@@ -88,7 +88,7 @@ async def stt(file: UploadFile = File(...)):
         # OpenAI Audio Transcriptions API :contentReference[oaicite:1]{index=1}
         with open(tmp_path, "rb") as f:
             transcription = client.audio.transcriptions.create(
-                model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe"),
+                model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe"),
                 file=f,
                 # language="en",  # optional
             )

@@ -22,6 +22,7 @@ class BotResponse(BaseModel):
     downloads: List[DownloadItem] = Field(default_factory=list)
     confidence: Literal["low", "medium", "high"] = "low"
     debug: Optional[Dict[str, Any]] = None
+    client_delay_ms: Optional[int] = None
 
 class TranscribeResponse(BaseModel):
     text: str

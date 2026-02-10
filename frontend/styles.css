@@ -295,27 +295,28 @@ select {
 
 .msg-row {
   display: flex;
-  margin: 8px 0;
+  margin: 10px 0;
+  width: 100%;
 }
 .msg-row.incoming {
   justify-content: flex-start;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
 }
 .msg-row.outgoing {
   justify-content: flex-end;
 }
 
 .msg-avatar {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border-radius: 999px;
   overflow: hidden;
   background: #fff;
   border: 1px solid var(--border);
-  box-shadow: 0 4px 10px rgba(24, 119, 242, 0.12);
-  flex: 0 0 28px;
-  margin-top: 2px;
+  box-shadow: 0 6px 14px rgba(24, 119, 242, 0.12);
+  flex: 0 0 30px;
+  margin-top: 4px;
 }
 .msg-avatar img {
   width: 100%;
@@ -326,10 +327,17 @@ select {
 .msg-content {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   max-width: calc(100% - 40px);
 }
 
+.msg-outgoing {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 78%;
+}
 .msg-title {
   font-size: 12px;
   font-weight: 700;
@@ -339,26 +347,28 @@ select {
 
 .bubble {
   max-width: 78%;
-  padding: 10px 12px;
-  border-radius: 18px;
+  padding: 11px 13px;
+  border-radius: 16px;
   font-size: 13.5px;
-  line-height: 1.25;
+  line-height: 1.35;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
+  word-break: normal;
   font-family: var(--chat-font);
 }
 
 .incoming .bubble {
   background: var(--incoming);
   color: #111827;
-  border-bottom-left-radius: 6px;
+  border-top-left-radius: 10px;
   max-width: 100%;
 }
 
 .outgoing .bubble {
   background: var(--outgoing);
   color: var(--outgoingText);
-  border-bottom-right-radius: 6px;
+  border-bottom-right-radius: 5px;
+  max-width: 100%;
 }
 
 .chat-composer {
@@ -373,10 +383,7 @@ select {
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border: 3px solid transparent;
-  background:
-    linear-gradient(#ffffff, #ffffff) padding-box,
-    linear-gradient(0deg, var(--primary), var(--secondary)) border-box;
+  border: 3px solid var(--primary);
   border-radius: 999px;
 }
 

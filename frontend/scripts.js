@@ -233,9 +233,14 @@ document.addEventListener("DOMContentLoaded", () => {
       row.appendChild(avatar);
       row.appendChild(content);
     } else {
+      const wrap = document.createElement("div");
+      wrap.className = "msg-outgoing";
+
       bubble = document.createElement("div");
       bubble.className = "bubble";
-      row.appendChild(bubble);
+
+      wrap.appendChild(bubble);
+      row.appendChild(wrap);
     }
 
     messagesEl.appendChild(row);
@@ -258,9 +263,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function addTypingBubble() {
     const { row, bubble } = addMessageRow("incoming");
-    bubble.innerHTML = `<span style="opacity:.7">Typing</span><span class="dots"></span>`;
+    const dots = document.createElement("span");
+    dots.className = "typing";
+    dots.innerHTML = "<span></span><span></span><span></span>";
+    bubble.appendChild(dots);
     bubble.classList.add("is-typing");
     return { row, bubble };
+  }
+
+  function isFileRequest(message) {
+    const q = String(message || "").toLowerCase();
+    return /form|forms|pdf|download|document|documents|file|files/.test(q);
   }
 
   // little dots animation via JS (no extra CSS needed)
@@ -506,12 +519,24 @@ document.addEventListener("DOMContentLoaded", () => {
     inputEl.value = "";
 
     // typing indicator
+    const fileish = isFileRequest(text);
     const { row: typingRow, bubble: typingBubble } = addTypingBubble();
+    const typingStart = Date.now();
+    const minTypingMs = fileish ? 1500 : 1500;
     const dotsSpan = typingBubble.querySelector(".dots");
     const stopDots = startDots(dotsSpan);
 
     try {
       const data = await sendMessageToAPI(text);
+      const serverDelay =
+        data && typeof data.client_delay_ms === "number"
+          ? data.client_delay_ms
+          : 0;
+      const elapsed = Date.now() - typingStart;
+      const targetDelay = Math.max(minTypingMs, serverDelay);
+      if (elapsed < targetDelay) {
+        await new Promise((r) => setTimeout(r, targetDelay - elapsed));
+      }
 
       // remove typing bubble
       stopDots();
@@ -542,7 +567,7 @@ document.addEventListener("DOMContentLoaded", () => {
       stopDots();
       typingRow.remove();
       addTextMessage(
-        "Sorry — I’m having trouble connecting right now. Please try again.",
+        "Sorry, I’m having trouble connecting right now. Please try again.",
         "incoming",
       );
       console.error(err);
@@ -570,6 +595,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // real recording (MediaRecorder) -> STT backend
   let recorder = null;
   let chunks = [];
+  let recordingCanceled = false;
 
   function formatTime(ms) {
     const total = Math.floor(ms / 1000);
@@ -659,6 +685,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (isRecording) return;
 
     isRecording = true;
+    recordingCanceled = false;
     setComposerMode("recording");
     micBtn.classList.add("recording");
     showHint("");
@@ -681,6 +708,12 @@ document.addEventListener("DOMContentLoaded", () => {
         stream.getTracks().forEach((t) => t.stop());
 
         const blob = new Blob(chunks, { type: "audio/webm" });
+
+        if (recordingCanceled) {
+          chunks = [];
+          showHint("");
+          return;
+        }
 
         // transcribing hint
         showHint("Transcribing…");
@@ -715,6 +748,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!isRecording) return;
 
     isRecording = false;
+    recordingCanceled = cancel;
     micBtn.classList.remove("recording");
     stopTimer();
     stopAudioMeter();
