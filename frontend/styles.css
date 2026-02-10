@@ -846,10 +846,13 @@ select {
     right: 10px;
     left: 10px;
     top: 10px;
-    bottom: 110px;
+    bottom: calc(82px + var(--kb-offset, 0px) + env(safe-area-inset-bottom));
     width: auto;
     height: auto;
     border-radius: 16px;
+  }
+  #chat-widget.kb-open #chat-panel {
+    bottom: calc(8px + var(--kb-offset, 0px) + env(safe-area-inset-bottom));
   }
   .chat-teaser {
     right: 6px;

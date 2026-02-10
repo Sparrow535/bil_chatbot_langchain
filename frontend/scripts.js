@@ -27,6 +27,7 @@
   // =====================
   // DOM
   // =====================
+  const widget = byId("chat-widget");
   const fab = byId("chat-fab");
   const panel = byId("chat-panel");
   const closeBtn = byId("chat-close");
@@ -52,6 +53,7 @@
 
   // Validate required nodes
   const required = {
+    widget,
     fab,
     panel,
     closeBtn,
@@ -113,6 +115,7 @@
         fab.classList.remove("fab-open");
       }
       ensureIntroMessage();
+      updateKeyboardOffset();
       setTimeout(() => inputEl.focus(), 50);
     } else {
       if (fabIcon) fabIcon.src = FAB_OPEN_ICON;
@@ -804,6 +807,51 @@
     });
   }
   }
+
+  // =====================
+  // Mobile keyboard handling (attach panel to keyboard)
+  // =====================
+  let baseViewportHeight = 0;
+  let baseInnerHeight = 0;
+
+  function updateBaseHeights() {
+    const vv = window.visualViewport;
+    const currentVVH = vv ? vv.height : 0;
+    baseViewportHeight = Math.max(baseViewportHeight, currentVVH || 0);
+    baseInnerHeight = Math.max(baseInnerHeight, window.innerHeight || 0);
+  }
+
+  function updateKeyboardOffset() {
+    if (!widget) return;
+    updateBaseHeights();
+
+    let offset = 0;
+    if (window.visualViewport) {
+      const vv = window.visualViewport;
+      const base = baseViewportHeight || vv.height || window.innerHeight;
+      const current = vv.height || window.innerHeight;
+      const delta = Math.max(0, base - current);
+      const safeDelta = Math.max(
+        0,
+        window.innerHeight - (vv.height || 0) - (vv.offsetTop || 0),
+      );
+      offset = Math.max(delta, safeDelta);
+    } else {
+      const base = baseInnerHeight || window.innerHeight;
+      offset = Math.max(0, base - window.innerHeight);
+    }
+
+    widget.style.setProperty("--kb-offset", `${offset}px`);
+    widget.classList.toggle("kb-open", offset > 0);
+  }
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", updateKeyboardOffset);
+    window.visualViewport.addEventListener("scroll", updateKeyboardOffset);
+  }
+  window.addEventListener("resize", updateKeyboardOffset);
+  document.addEventListener("focusin", updateKeyboardOffset);
+  document.addEventListener("focusout", updateKeyboardOffset);
 
   window.BILChatbotInit = initChatbot;
 
