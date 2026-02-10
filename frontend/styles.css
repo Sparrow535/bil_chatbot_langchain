@@ -35,6 +35,19 @@ select {
 }
 
 #chat-widget {
+  --panel: #fff;
+  --border: rgba(0, 0, 0, 0.08);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+  --primary: #0658c4;
+  --secondary: #0099c3;
+  --muted: #6b7280;
+  --incoming: #dbeaff;
+  --outgoing: #0658c4;
+  --outgoingText: #fff;
+  --font:
+    "Gilroy", "Gilroy-Regular", "Gilroy-Medium", "Gilroy-Bold", system-ui,
+    -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  --chat-font: var(--font);
   position: fixed;
   right: 18px;
   bottom: 18px;

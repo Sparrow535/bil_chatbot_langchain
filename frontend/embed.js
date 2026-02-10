@@ -12,22 +12,12 @@
   const assetBase = fromAttr("data-asset-base", baseFromScript);
   const apiBase = fromAttr("data-api-base", baseFromScript);
 
-  window.BILChatbotConfig = {
-    ...(window.BILChatbotConfig || {}),
-    apiBase,
-    assetBase,
-    botName: fromAttr("data-bot-name", "Norbu"),
-    botLogo: fromAttr("data-bot-logo", assetBase ? `${assetBase}/assets/logo.svg` : "./assets/logo.svg"),
-  };
-
-  const ensureCss = () => {
+  const ensureCss = (root) => {
     const href = assetBase ? `${assetBase}/styles.css` : "./styles.css";
-    const exists = Array.from(document.styleSheets || []).some((s) => s.href === href);
-    if (exists) return;
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href = href;
-    document.head.appendChild(link);
+    root.appendChild(link);
   };
 
   const ensureMarked = () =>
@@ -49,7 +39,7 @@
       document.body.appendChild(s);
     });
 
-  const injectHtml = () => {
+  const injectHtml = (root) => {
     const widget = document.createElement("div");
     widget.id = "chat-widget";
     widget.innerHTML = `
@@ -120,12 +110,26 @@
         </footer>
       </section>
     `;
-    document.body.appendChild(widget);
+    root.appendChild(widget);
   };
 
   (async () => {
-    ensureCss();
-    injectHtml();
+    const host = document.createElement("div");
+    host.id = "bil-chatbot-host";
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+
+    window.BILChatbotConfig = {
+      ...(window.BILChatbotConfig || {}),
+      root: shadow,
+      apiBase,
+      assetBase,
+      botName: fromAttr("data-bot-name", "Norbu"),
+      botLogo: fromAttr("data-bot-logo", assetBase ? `${assetBase}/assets/logo.svg` : "./assets/logo.svg"),
+    };
+
+    ensureCss(shadow);
+    injectHtml(shadow);
     await ensureMarked();
     await ensureScripts();
     if (window.BILChatbotInit) window.BILChatbotInit();

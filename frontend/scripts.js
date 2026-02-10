@@ -8,6 +8,9 @@
   // CONFIG
   // =====================
   const GLOBAL_CONFIG = window.BILChatbotConfig || {};
+  const ROOT = GLOBAL_CONFIG.root || document;
+  const byId = (id) =>
+    ROOT.getElementById ? ROOT.getElementById(id) : ROOT.querySelector(`#${id}`);
   const API_BASE = GLOBAL_CONFIG.apiBase || "";
   const ASSET_BASE = (GLOBAL_CONFIG.assetBase || "").replace(/\/$/, "");
   const API_URL = GLOBAL_CONFIG.apiUrl || (API_BASE ? `${API_BASE}/chat` : "/chat");
@@ -24,28 +27,28 @@
   // =====================
   // DOM
   // =====================
-  const fab = document.getElementById("chat-fab");
-  const panel = document.getElementById("chat-panel");
-  const closeBtn = document.getElementById("chat-close");
-  const teaser = document.getElementById("chat-teaser");
-  const teaserClose = document.getElementById("teaser-close");
-  const fabIcon = document.getElementById("fab-icon");
+  const fab = byId("chat-fab");
+  const panel = byId("chat-panel");
+  const closeBtn = byId("chat-close");
+  const teaser = byId("chat-teaser");
+  const teaserClose = byId("teaser-close");
+  const fabIcon = byId("fab-icon");
 
-  const messagesEl = document.getElementById("chat-messages");
-  const inputEl = document.getElementById("chat-input");
-  const sendBtn = document.getElementById("send-btn");
-  const statusEl = document.getElementById("bot-status");
+  const messagesEl = byId("chat-messages");
+  const inputEl = byId("chat-input");
+  const sendBtn = byId("send-btn");
+  const statusEl = byId("bot-status");
 
-  const micBtn = document.getElementById("mic-btn");
-  const hintEl = document.getElementById("hint");
+  const micBtn = byId("mic-btn");
+  const hintEl = byId("hint");
   const micDefaultHtml = micBtn ? micBtn.innerHTML : "";
 
-  const composerNormal = document.getElementById("composer-normal");
-  const composerRecording = document.getElementById("composer-recording");
+  const composerNormal = byId("composer-normal");
+  const composerRecording = byId("composer-recording");
 
-  const recTimerEl = document.getElementById("rec-timer");
-  const recCancelBtn = document.getElementById("rec-cancel");
-  const recSendBtn = document.getElementById("rec-send");
+  const recTimerEl = byId("rec-timer");
+  const recCancelBtn = byId("rec-cancel");
+  const recSendBtn = byId("rec-send");
 
   // Validate required nodes
   const required = {
@@ -291,15 +294,6 @@
   }
 
   // little dots animation via JS (no extra CSS needed)
-  function startDots(el) {
-    let n = 0;
-    const t = setInterval(() => {
-      n = (n + 1) % 4;
-      el.textContent = ".".repeat(n);
-    }, 300);
-    return () => clearInterval(t);
-  }
-
   function randomDelay() {
     return (
       Math.floor(Math.random() * (TYPE_MAX_DELAY - TYPE_MIN_DELAY + 1)) +
@@ -537,9 +531,6 @@
     const { row: typingRow, bubble: typingBubble } = addTypingBubble();
     const typingStart = Date.now();
     const minTypingMs = fileish ? 1500 : 1500;
-    const dotsSpan = typingBubble.querySelector(".dots");
-    const stopDots = startDots(dotsSpan);
-
     try {
       const data = await sendMessageToAPI(text);
       const serverDelay =
@@ -553,7 +544,6 @@
       }
 
       // remove typing bubble
-      stopDots();
       typingRow.remove();
 
       // pick markdown if available
@@ -578,7 +568,6 @@
         addDownloadsUI(data.downloads);
       }
     } catch (err) {
-      stopDots();
       typingRow.remove();
       addTextMessage(
         "Sorry, I’m having trouble connecting right now. Please try again.",
@@ -604,7 +593,7 @@
   let dataArray = null;
   let rafId = null;
   let mediaStream = null;
-  const bars = Array.from(document.querySelectorAll(".sound-bars span"));
+  const bars = Array.from(ROOT.querySelectorAll(".sound-bars span"));
 
   // real recording (MediaRecorder) -> STT backend
   let recorder = null;
