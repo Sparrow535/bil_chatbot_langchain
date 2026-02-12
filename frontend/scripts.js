@@ -127,6 +127,7 @@
         fab.classList.add("fab-open");
         fab.classList.remove("fab-close");
       }
+      forceKeyboardClosed();
       scheduleTeaser();
     }
   }
@@ -870,6 +871,15 @@
     }
   }
 
+  function forceKeyboardClosed() {
+    if (!widget) return;
+    widget.style.setProperty("--kb-offset", "0px");
+    if (kbCloseTimer) clearTimeout(kbCloseTimer);
+    kbCloseTimer = setTimeout(() => {
+      widget.classList.remove("kb-open");
+    }, 180);
+  }
+
   updateBaseHeights(true);
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", updateKeyboardOffset);
@@ -877,7 +887,15 @@
   }
   window.addEventListener("resize", updateKeyboardOffset);
   document.addEventListener("focusin", updateKeyboardOffset);
-  document.addEventListener("focusout", updateKeyboardOffset);
+  document.addEventListener("focusout", () => {
+    updateKeyboardOffset();
+    setTimeout(() => {
+      if (!widget) return;
+      if (!widget.contains(document.activeElement)) {
+        forceKeyboardClosed();
+      }
+    }, 120);
+  });
 
   // =====================
   // Open/close events

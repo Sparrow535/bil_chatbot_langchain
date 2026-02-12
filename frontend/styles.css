@@ -398,10 +398,13 @@ select {
   padding: 8px 10px;
   border: 3px solid var(--primary);
   border-radius: 999px;
+  width: 100%;
+  flex-wrap: nowrap;
 }
 
 #chat-input {
   flex: 1;
+  min-width: 0;
   height: 34px;
   border: none;
   outline: none;
@@ -918,5 +921,29 @@ select {
   #chat-fab.fab-close .fab-image {
     width: 24px;
     height: 24px;
+  }
+}
+
+@media (max-width: 360px) {
+  .chat-composer {
+    padding: 6px;
+  }
+  .composer-pill {
+    gap: 6px;
+    padding: 5px 6px;
+    border-width: 2px;
+  }
+  #chat-input {
+    height: 28px;
+    font-size: 16px;
+    padding: 0 4px;
+  }
+  .pill-icon {
+    width: 28px;
+    height: 28px;
+  }
+  .pill-svg {
+    width: 16px;
+    height: 16px;
   }
 }
