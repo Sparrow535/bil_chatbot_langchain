@@ -363,7 +363,7 @@ select {
   padding: 11px 13px;
   border-radius: 16px;
   font-size: 13.5px;
-  line-height: 1.35;
+  line-height: 1.42;
   white-space: pre-wrap;
   overflow-wrap: break-word;
   word-break: normal;
@@ -681,7 +681,7 @@ select {
 
 /* Make markdown content compact */
 .bubble {
-  line-height: 1.25; /* tighter */
+  line-height: 1.36; /* slightly more breathing room */
   white-space: normal; /* markdown HTML controls spacing */
 }
 
@@ -752,7 +752,8 @@ select {
   padding-left: 16px;
 }
 .bubble li {
-  margin-top: 4px;
+  margin-top: 6px;
+  line-height: 1.4;
 }
 
 /* Headings should NOT be huge */
