@@ -43,6 +43,13 @@ _HELP_CLOSINGS = [
     "I’m here to help with anything else you need.",
     "Glad to help anytime you need more support.",
 ]
+_STYLE_HINTS = [
+    "Use a short direct answer first, then 3-5 concise bullets.",
+    "Use a compact summary paragraph, then grouped bullets by category.",
+    "Use a mini checklist style with numbered steps when useful.",
+    "Use concise subheadings with 1-2 bullets each.",
+    "Keep it brief and practical with minimal headings.",
+]
 
 # =========================
 # Social intents
@@ -63,6 +70,9 @@ def normalize_query_aliases(text: str) -> str:
         return t
     # Common ASR typo: PIL -> BIL
     t = re.sub(r"\bPIL\b", "BIL", t, flags=re.IGNORECASE)
+    # Common shorthand for BIL fund products
+    t = re.sub(r"\bPF\b", "PPF", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bGFM\b", "GFM", t, flags=re.IGNORECASE)
     return t
 
 def detect_social_intent(q: str) -> Optional[str]:
@@ -220,6 +230,21 @@ def last_assistant_message(history: List[Dict[str, str]]) -> str:
             return txt
     return ""
 
+def build_recent_history_context(history: List[Dict[str, str]], max_items: int = 4) -> str:
+    if not history:
+        return "No recent chat context."
+    items = []
+    for m in history[-max_items:]:
+        role = (m.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = (m.get("content") or "").strip()
+        content = re.sub(r"\s+", " ", content)
+        if len(content) > 220:
+            content = content[:220].rstrip() + "..."
+        items.append(f"{role}: {content}")
+    return "\n".join(items) if items else "No recent chat context."
+
 def is_affirmative_reply(q: str) -> bool:
     qn = _norm(q)
     if not qn:
@@ -227,7 +252,79 @@ def is_affirmative_reply(q: str) -> bool:
     return qn in {"yes", "yeah", "yep", "sure", "ok", "okay", "please", "alright"}
 
 def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
-    return q
+    qn = _norm(q)
+    expanded = [qn]
+
+    # Expand short fund-related asks so vector search has enough signal.
+    if qn in {"pf", "ppf", "gf", "gfm", "provident", "gratuity", "fund", "funds"}:
+        expanded.append("private provident and gratuity fund ppf gf")
+        expanded.append("ppf gfm department bil")
+
+    if any(k in qn for k in ["ppf", "provident", "gratuity", "gf", "gfm", "fund"]):
+        expanded.append("private provident fund and gratuity fund bil")
+        expanded.append("ppf employee registration contribution nominee refund form")
+        expanded.append("loan against private provident fund ppf")
+
+    # Keep retrieval anchored to BIL for short/ambiguous user inputs.
+    if len(qn.split()) <= 3 and "bil" not in qn and "bhutan insurance" not in qn:
+        expanded.append(f"{qn} bil")
+
+    # Use recent user context for very short follow-ups.
+    if len(qn.split()) <= 2:
+        topic = _norm(last_user_topic(history))
+        if topic and topic != qn:
+            expanded.append(f"{qn} {topic}")
+
+    seen = set()
+    out = []
+    for part in expanded:
+        part = part.strip()
+        if not part or part in seen:
+            continue
+        seen.add(part)
+        out.append(part)
+
+    return " ".join(out)
+
+def should_promote_unrelated_to_bil(
+    q: str,
+    history: List[Dict[str, str]],
+    hinted_intent: str,
+) -> tuple[bool, List[Dict[str, Any]]]:
+    """
+    Dynamic fallback:
+    - If intent hint says unrelated, probe retrieval confidence.
+    - Promote to bil_query only when retrieved chunk confidence is strong enough.
+    """
+    if hinted_intent != "unrelated":
+        return False, []
+    if detect_social_intent(q):
+        return False, []
+    if looks_like_form_request(q) or is_vague_form_request(q):
+        return False, []
+
+    probe_query = build_retrieval_query(q, history)
+    try:
+        probe_json = bil_retrieve_context.run(probe_query)
+        probe_obj = json.loads(probe_json)
+    except Exception:
+        return False, []
+
+    chunks = probe_obj.get("chunks", []) or []
+    if not chunks:
+        return False, []
+
+    best = 0.0
+    for c in chunks:
+        try:
+            best = max(best, float(c.get("score", 0.0)))
+        except Exception:
+            continue
+
+    min_strong = max(settings.min_relevance, 0.26)
+    if best >= min_strong:
+        return True, chunks
+    return False, []
 
 def is_direct_question(q: str) -> bool:
     qn = _norm(q)
@@ -414,6 +511,8 @@ BEHAVIOR:
 DYNAMIC RESPONSE STYLE (IMPORTANT):
 - Match the response style to the user’s intent and how they asked.
 - First line must directly address the user’s main ask.
+- Do not repeat the same response pattern every turn; vary structure naturally.
+- Use RECENT CHAT CONTEXT to interpret follow-up fragments and to avoid monotonous formatting.
 - Then choose ONE layout below for answer_md (pick the most suitable; do not use all):
 
 LAYOUT TOOLBOX (choose 1):
@@ -461,7 +560,7 @@ Return ONLY JSON matching this schema:
 prompt = ChatPromptTemplate.from_messages(
     [
         ("system", SYSTEM_TEMPLATE),
-        ("human", "USER QUERY:\n{query}\n\nCONTEXT:\n{context}\n"),
+        ("human", "USER QUERY:\n{query}\n\nRECENT CHAT CONTEXT:\n{history_context}\n\nSTYLE GUIDANCE:\n{style_hint}\n\nCONTEXT:\n{context}\n"),
     ]
 ).partial(format_instructions=parser.get_format_instructions())
 
@@ -474,7 +573,7 @@ def _llm() -> ChatOpenAI:
     }
     # Some models (e.g., gpt-5-nano) only allow default temperature
     if not str(settings.chat_model).startswith("gpt-5"):
-        kwargs["temperature"] = 0.2
+        kwargs["temperature"] = 0.35
     return ChatOpenAI(**kwargs)
 
 
@@ -533,6 +632,14 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         hint = bil_intent_hint.run(q)
     except Exception:
         hint = "bil_query"
+
+    # Dynamic fallback: if hint says unrelated but retrieval confidence is strong,
+    # treat it as a BIL query (helps short follow-up fragments).
+    prefetched_chunks: List[Dict[str, Any]] = []
+    promote_to_bil, probe_chunks = should_promote_unrelated_to_bil(q, history, hint)
+    if promote_to_bil:
+        hint = "bil_query"
+        prefetched_chunks = probe_chunks
 
     # 2) Forms path (ONLY when this message is form-ish)
     formish_now = looks_like_form_request(q) or is_vague_form_request(q) or hint == "form_request"
@@ -604,13 +711,16 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         }, user_query=q)
 
     # 4) BIL Query: retrieve context + ask LLM
-    try:
-        retrieval_query = build_retrieval_query(q, history)
-        ctx_json = bil_retrieve_context.run(retrieval_query)
-        ctx_obj = json.loads(ctx_json)
-        chunks = ctx_obj.get("chunks", []) or []
-    except Exception:
-        chunks = []
+    if prefetched_chunks:
+        chunks = prefetched_chunks
+    else:
+        try:
+            retrieval_query = build_retrieval_query(q, history)
+            ctx_json = bil_retrieve_context.run(retrieval_query)
+            ctx_obj = json.loads(ctx_json)
+            chunks = ctx_obj.get("chunks", []) or []
+        except Exception:
+            chunks = []
 
     if not chunks:
         # Retry with prior topic for vague follow-ups
@@ -634,9 +744,16 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         }, user_query=q)
 
     context = "\n\n".join([f"- {c.get('content','')}" for c in chunks[: settings.top_k]])
+    history_context = build_recent_history_context(history)
+    style_hint = random.choice(_STYLE_HINTS)
 
     llm = _llm()
-    msgs = prompt.format_messages(query=q, context=context)
+    msgs = prompt.format_messages(
+        query=q,
+        context=context,
+        history_context=history_context,
+        style_hint=style_hint,
+    )
     out = llm.invoke(msgs).content or ""
 
     # Parse

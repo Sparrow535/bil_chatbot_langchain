@@ -149,8 +149,14 @@ def bil_retrieve_context(query: str) -> str:
     with _resource_lock:
         vectorstore = _vectorstore
 
+    qn = (query or "").lower()
+    fund_terms = {"ppf", "provident", "gratuity", "gf", "gfm", "private provident"}
+    k = settings.top_k
+    if any(t in qn for t in fund_terms):
+        k = max(settings.top_k, 8)
+
     # Use raw scores and normalize to 0..1 to avoid invalid relevance warnings
-    docs = vectorstore.similarity_search_with_score(query, k=settings.top_k)
+    docs = vectorstore.similarity_search_with_score(query, k=k)
 
     def _to_similarity(score: float) -> float:
         try:
@@ -162,22 +168,34 @@ def bil_retrieve_context(query: str) -> str:
         # Treat as distance or unbounded score -> map to (0,1]
         return 1.0 / (1.0 + abs(s))
 
+    q_tokens = set(_tokenize(query))
     strong = []
     all_scored = []
     for d, score in docs:
         sim = _to_similarity(score)
-        all_scored.append((d, sim))
-        if sim >= settings.min_relevance:
+        hay = (
+            f"{d.metadata.get('title', '')} "
+            f"{d.metadata.get('source', '')} "
+            f"{(d.page_content or '')[:2200]}"
+        ).lower()
+        lexical_hits = sum(1 for t in q_tokens if t and t in hay)
+        boosted = min(1.0, sim + (0.08 * min(3, lexical_hits)))
+
+        all_scored.append((d, boosted))
+        if boosted >= settings.min_relevance:
             strong.append({
                 "content": clean_text(d.page_content),
                 "source": d.metadata.get("source", ""),
                 "title": d.metadata.get("title", ""),
-                "score": sim,
+                "score": boosted,
             })
+
+    strong.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
     # If nothing meets threshold, fall back to top results
     if not strong and all_scored:
-        for d, sim in all_scored[: max(1, min(2, len(all_scored)))]:
+        all_scored.sort(key=lambda x: x[1], reverse=True)
+        for d, sim in all_scored[: max(1, min(3, len(all_scored)))]:
             strong.append({
                 "content": clean_text(d.page_content),
                 "source": d.metadata.get("source", ""),
@@ -208,18 +226,47 @@ def bil_intent_hint(query: str) -> str:
     Returns one of: form_request | bil_query | unrelated
     """
     q = (query or "").lower()
+    q_clean = re.sub(r"[^\w\s/+-]", " ", q)
+    q_clean = re.sub(r"\s+", " ", q_clean).strip()
 
     if looks_like_form_request(q):
         return "form_request"
+
+    # Short finance shorthand used by users
+    short_bil_finance = {
+        "pf",
+        "ppf",
+        "gf",
+        "gfm",
+        "fund",
+        "funds",
+        "provident",
+        "gratuity",
+        "provident fund",
+        "private provident fund",
+        "private provident and gratuity fund",
+        "ppf gf",
+        "ppf/gf",
+    }
+    if q_clean in short_bil_finance:
+        return "bil_query"
 
     bil_terms = [
         "bhutan insurance", "bil", "insurance", "policy", "premium", "claim",
         "motor", "health", "travel", "fire", "branch", "contact", "loan",
         "machinery", "machinery breakdown", "contractor", "contractors", "plant",
         "engineering", "burglary", "liability", "aviation", "marine", "fidelity",
-        "money", "personal accident", "workmen", "student care"
+        "money", "personal accident", "workmen", "student care",
+        "ppf", "gf", "gfm", "provident", "gratuity", "private provident",
+        "private provident fund", "private provident and gratuity fund",
+        "loan against ppf", "fund management", "investment department",
+        "ppf refund", "ppf employee registration", "ppf contribution",
+        "ppf change of nominee", "mou gratuity fund", "mou ppf",
+        "agriculture", "livestock", "tourism", "hotel", "hospitality",
+        "service sector", "trade and commerce", "industrial", "housing",
+        "loan for shares", "shares and securities", "vehicle loan"
     ]
-    if any(t in q for t in bil_terms) or "bil.bt" in q:
+    if any(t in q_clean for t in bil_terms) or "bil.bt" in q_clean:
         return "bil_query"
 
     return "unrelated"
