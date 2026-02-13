@@ -9,9 +9,14 @@ import threading
 from langchain.tools import tool
 from app.config import settings
 from app.vectorstore import load_vectorstore
-from app.text_utils import looks_like_form_request, clean_text
+from app.text_utils import (
+    looks_like_form_download_request,
+    looks_like_document_download_request,
+    clean_text,
+)
 
 FORMS_PATH = Path("data/forms.json")
+RAW_PATH = Path("data/raw.jsonl")
 
 
 # ---- IMPORTANT: Tune these ----
@@ -50,6 +55,43 @@ def _load_forms() -> List[Dict[str, Any]]:
     if not FORMS_PATH.exists():
         return []
     return json.loads(FORMS_PATH.read_text(encoding="utf-8"))
+
+def _load_documents() -> List[Dict[str, Any]]:
+    if not RAW_PATH.exists():
+        return []
+
+    out: Dict[str, Dict[str, Any]] = {}
+    with RAW_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            source = (obj.get("source") or "").strip()
+            if not source:
+                continue
+
+            lower_src = source.lower().split("?")[0]
+            doc_type = (obj.get("type") or "").strip().lower()
+            if doc_type != "document" and not lower_src.endswith((".pdf", ".doc", ".docx")):
+                continue
+
+            if source in out:
+                continue
+
+            title = (obj.get("title") or _title_from_url(source)).strip()
+            text = (obj.get("text") or "").strip()
+            out[source] = {
+                "title": title or _title_from_url(source),
+                "url": source,
+                "snippet": clean_text(text[:1200]) if text else "",
+            }
+
+    return list(out.values())
 
 def _score_form(query: str, form: Dict[str, Any]) -> float:
     """Score a form by overlap of meaningful tokens + small bonus for filename/url matches."""
@@ -90,31 +132,35 @@ def _best_matches(query: str, forms: List[Dict[str, Any]], top_k: int = TOP_K) -
 
 _vectorstore = None
 _forms = None
+_docs = None
 _resource_lock = threading.RLock()
 
 def init_resources():
-    global _forms, _vectorstore
+    global _forms, _docs, _vectorstore
     with _resource_lock:
         if _forms is None:
             _forms = _load_forms()
+        if _docs is None:
+            _docs = _load_documents()
         if _vectorstore is None:
             _vectorstore = load_vectorstore()
 
 def refresh_vectorstore() -> None:
     """Reload vectorstore + forms safely after incremental indexing."""
-    global _vectorstore, _forms
+    global _vectorstore, _forms, _docs
     with _resource_lock:
         _vectorstore = load_vectorstore()
         _forms = _load_forms()
+        _docs = _load_documents()
 
 @tool
 def bil_get_forms(query: str) -> str:
     """
-    Use when user asks for downloadable forms/documents.
+    Use when user asks for downloadable forms.
     Returns JSON string with matching forms and URLs (from forms.json only).
     """
     init_resources()
-    if not looks_like_form_request(query):
+    if not looks_like_form_download_request(query):
         return json.dumps({"matches": [], "found": False}, ensure_ascii=False)
 
     with _resource_lock:
@@ -135,6 +181,110 @@ def bil_get_forms(query: str) -> str:
         },
         ensure_ascii=False,
     )
+
+def _score_document(query: str, doc: Dict[str, Any]) -> float:
+    q_tokens = set(_tokenize(query))
+    if not q_tokens:
+        return 0.0
+
+    title = doc.get("title") or ""
+    url = doc.get("url") or ""
+    snippet = doc.get("snippet") or ""
+    hay = f"{title} {url} {snippet}"
+    h_tokens = set(_tokenize(hay))
+
+    overlap = len(q_tokens & h_tokens)
+    if overlap == 0:
+        return 0.0
+
+    base = overlap / max(1, len(q_tokens))
+    bonus = 0.0
+
+    years = re.findall(r"\b(20\d{2})\b", query or "")
+    if years:
+        for y in years:
+            if y in title or y in url or y in snippet:
+                bonus += 0.25
+
+    ql = (query or "").lower()
+    title_l = title.lower()
+    url_l = url.lower()
+    if "annual report" in ql and ("annual report" in title_l or "annual-report" in url_l):
+        bonus += 0.20
+    if any(w in ql for w in ["handbook", "guide", "manual"]):
+        if any(w in title_l for w in ["handbook", "guide", "manual"]):
+            bonus += 0.15
+
+    return min(1.0, base + bonus)
+
+@tool
+def bil_get_documents(query: str) -> str:
+    """
+    Use when user asks to download non-form documents
+    (annual reports, handbooks, guides, publications, PDFs).
+    Returns JSON: {"matches":[{"title","url"}], "found": bool}
+    """
+    init_resources()
+    if not looks_like_document_download_request(query):
+        return json.dumps({"matches": [], "found": False}, ensure_ascii=False)
+
+    with _resource_lock:
+        docs = list(_docs or [])
+
+    ql = (query or "").lower()
+    want_report = ("annual report" in ql) or bool(re.search(r"\breport(s)?\b", ql))
+    want_handbook = "handbook" in ql
+    want_guide = "guide" in ql or "manual" in ql
+
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for d in docs:
+        title_l = (d.get("title") or "").lower()
+        url_l = (d.get("url") or "").lower()
+
+        if want_report and not (
+            "annual report" in title_l
+            or "annual-report" in url_l
+            or re.search(r"\breport\b", title_l)
+        ):
+            continue
+        if want_handbook and "handbook" not in title_l and "handbook" not in url_l:
+            continue
+        if want_guide and not (
+            "guide" in title_l or "manual" in title_l or "guide" in url_l or "manual" in url_l
+        ):
+            continue
+
+        s = _score_document(query, d)
+        if s >= 0.22:
+            scored.append((s, d))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    years = re.findall(r"\b(20\d{2})\b", query or "")
+    if years:
+        year_hits_url: List[Tuple[float, Dict[str, Any]]] = []
+        year_hits_title: List[Tuple[float, Dict[str, Any]]] = []
+        for s, d in scored:
+            title_l = (d.get("title") or "").lower()
+            url_l = (d.get("url") or "").lower()
+            if any(y in url_l for y in years):
+                year_hits_url.append((s, d))
+                continue
+            if any(re.search(rf"\b{y}\b", title_l) for y in years):
+                year_hits_title.append((s, d))
+        if year_hits_url:
+            scored = year_hits_url
+        elif year_hits_title:
+            scored = year_hits_title
+
+    top = []
+    for _, d in scored[:6]:
+        title = (d.get("title") or _title_from_url(d.get("url", ""))).strip()
+        url = (d.get("url") or "").strip()
+        if not url:
+            continue
+        top.append({"title": title, "url": url})
+
+    return json.dumps({"matches": top, "found": bool(top)}, ensure_ascii=False)
 
 
 
@@ -229,8 +379,10 @@ def bil_intent_hint(query: str) -> str:
     q_clean = re.sub(r"[^\w\s/+-]", " ", q)
     q_clean = re.sub(r"\s+", " ", q_clean).strip()
 
-    if looks_like_form_request(q):
+    if looks_like_form_download_request(q):
         return "form_request"
+    if looks_like_document_download_request(q):
+        return "bil_query"
 
     # Short finance shorthand used by users
     short_bil_finance = {
@@ -264,7 +416,10 @@ def bil_intent_hint(query: str) -> str:
         "ppf change of nominee", "mou gratuity fund", "mou ppf",
         "agriculture", "livestock", "tourism", "hotel", "hospitality",
         "service sector", "trade and commerce", "industrial", "housing",
-        "loan for shares", "shares and securities", "vehicle loan"
+        "loan for shares", "shares and securities", "vehicle loan",
+        "annual report", "annual reports", "report", "reports",
+        "insurance handbook", "handbook", "publications", "publication",
+        "download forms", "claim intimation", "authorization letter"
     ]
     if any(t in q_clean for t in bil_terms) or "bil.bt" in q_clean:
         return "bil_query"

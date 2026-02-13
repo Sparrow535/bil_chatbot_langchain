@@ -10,8 +10,17 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 
 from app.config import settings
-from app.text_utils import looks_like_form_request
-from app.tools import bil_get_forms, bil_retrieve_context, bil_unrelated_reply, bil_intent_hint
+from app.text_utils import (
+    looks_like_form_download_request,
+    looks_like_document_download_request,
+)
+from app.tools import (
+    bil_get_forms,
+    bil_get_documents,
+    bil_retrieve_context,
+    bil_unrelated_reply,
+    bil_intent_hint,
+)
 
 load_dotenv()
 
@@ -189,6 +198,15 @@ def is_vague_form_request(q: str) -> bool:
         return True
     return False
 
+def extract_form_topic(q: str) -> str:
+    qn = _norm(q)
+    m = re.search(r"\bform\b\s+(for|of)\s+(.+)$", qn)
+    if not m:
+        return ""
+    topic = m.group(2).strip()
+    topic = re.sub(r"\b(this|that|it)\b", "", topic).strip()
+    return topic
+
 def last_user_topic(history: List[Dict[str, str]]) -> str:
     """
     Use last meaningful USER message.
@@ -202,6 +220,9 @@ def last_user_topic(history: List[Dict[str, str]]) -> str:
             continue
         if is_affirmative_reply(txt):
             continue
+        form_topic = extract_form_topic(txt)
+        if form_topic:
+            return form_topic
         if is_vague_form_request(txt):
             continue
         if _norm(txt) in {"types", "type", "options", "details", "more", "more info"}:
@@ -265,6 +286,13 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
         expanded.append("ppf employee registration contribution nominee refund form")
         expanded.append("loan against private provident fund ppf")
 
+    # Follow-ups like "how to fill this form", "for 2022", "details"
+    if any(p in qn for p in ["this form", "that form", "fill this form", "fill the form", "details", "for 20"]):
+        topic = _norm(last_user_topic(history))
+        if topic:
+            expanded.append(f"{qn} {topic}")
+            expanded.append(topic)
+
     # Keep retrieval anchored to BIL for short/ambiguous user inputs.
     if len(qn.split()) <= 3 and "bil" not in qn and "bhutan insurance" not in qn:
         expanded.append(f"{qn} bil")
@@ -300,7 +328,7 @@ def should_promote_unrelated_to_bil(
         return False, []
     if detect_social_intent(q):
         return False, []
-    if looks_like_form_request(q) or is_vague_form_request(q):
+    if looks_like_form_download_request(q) or is_vague_form_request(q):
         return False, []
 
     probe_query = build_retrieval_query(q, history)
@@ -406,14 +434,49 @@ def build_form_query_variants(user_query: str, history: List[Dict[str, str]]) ->
 
     return out[:8]
 
+def build_document_query_variants(user_query: str, history: List[Dict[str, str]]) -> List[str]:
+    qn = _norm(user_query)
+    variants: List[str] = [qn]
+
+    years = re.findall(r"\b(20\d{2})\b", qn)
+    topic = _norm(last_user_topic(history))
+
+    if "annual report" in qn or "report" in qn:
+        variants.append("annual report")
+    if "handbook" in qn or "guide" in qn or "manual" in qn:
+        variants.append("insurance handbook")
+
+    if years:
+        y = years[0]
+        variants.append(f"annual report {y}")
+        variants.append(f"report {y}")
+        if topic:
+            variants.append(f"{topic} {y}")
+
+    # Short follow-up like "for 2022 to download"
+    if (len(qn.split()) <= 5 or qn.startswith("for ")) and topic:
+        variants.append(f"{topic} {qn}")
+        variants.append(topic)
+
+    seen = set()
+    out: List[str] = []
+    for v in variants:
+        v = _norm(v)
+        if not v or v in seen:
+            continue
+        seen.add(v)
+        out.append(v)
+    return out[:8]
+
 
 def enforce_downloads_rules(data: Dict[str, Any], user_query: str) -> None:
     """
     HARD RULE: only include downloads if user is actually requesting forms in THIS turn.
     Prevents random forms appearing for normal product Qs.
     """
-    formish_now = looks_like_form_request(user_query) or is_vague_form_request(user_query)
-    if not formish_now:
+    form_download_now = looks_like_form_download_request(user_query) or is_vague_form_request(user_query)
+    doc_download_now = looks_like_document_download_request(user_query)
+    if not form_download_now and not doc_download_now:
         data["downloads"] = []
         # also ensure we don't label it form_request accidentally
         if data.get("intent") == "form_request":
@@ -641,8 +704,8 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         hint = "bil_query"
         prefetched_chunks = probe_chunks
 
-    # 2) Forms path (ONLY when this message is form-ish)
-    formish_now = looks_like_form_request(q) or is_vague_form_request(q) or hint == "form_request"
+    # 2) Forms path (ONLY when this message explicitly asks to get a form)
+    formish_now = looks_like_form_download_request(q) or is_vague_form_request(q) or hint == "form_request"
     if formish_now:
         candidate_queries = build_form_query_variants(q, history)
 
@@ -696,6 +759,38 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "sources": [],
             "confidence": "low",
         }, user_query=q)
+
+    # 2b) Document download path (annual reports, handbooks, guides, etc.)
+    doc_download_now = looks_like_document_download_request(q)
+    if doc_download_now:
+        candidate_queries = build_document_query_variants(q, history)
+        merged: List[Dict[str, Any]] = []
+        seen_urls = set()
+
+        for cq in candidate_queries:
+            try:
+                tool_out = bil_get_documents.run(cq)
+                obj = json.loads(tool_out)
+                matches = obj.get("matches", []) or []
+                for m in matches:
+                    url = (m.get("url") or "").strip()
+                    title = (m.get("title") or "").strip()
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    merged.append({"title": title, "url": url})
+            except Exception:
+                continue
+
+        if merged:
+            return finalize({
+                "intent": "bil_query",
+                "answer": "I found the requested document(s). You can download them below.",
+                "answer_md": "**I found the requested document(s).**\n\nYou can download them below.",
+                "downloads": merged[:6],
+                "sources": [],
+                "confidence": "high",
+            }, user_query=q)
 
     # 3) Unrelated
     if hint == "unrelated":

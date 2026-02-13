@@ -50,7 +50,18 @@ def chat(req: ChatRequest):
     result = run_agent(query=req.message, history=history)
 
     SESSION_HISTORY[sid].append({"role": "user", "content": req.message})
-    SESSION_HISTORY[sid].append({"role": "assistant", "content": result.get("answer", "")})
+    assistant_hist = str(result.get("answer", "") or "")
+    raw_downloads = result.get("downloads") or []
+    if isinstance(raw_downloads, list) and raw_downloads:
+        titles = []
+        for d in raw_downloads:
+            if isinstance(d, dict):
+                t = str(d.get("title", "") or "").strip()
+                if t:
+                    titles.append(t)
+        if titles:
+            assistant_hist = f"{assistant_hist} Downloads: {', '.join(titles[:4])}".strip()
+    SESSION_HISTORY[sid].append({"role": "assistant", "content": assistant_hist})
 
     downloads = []
     for d in (result.get("downloads") or []):
