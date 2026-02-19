@@ -11,6 +11,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 from app.config import settings
 from app.text_utils import (
+    looks_like_form_request,
     looks_like_form_download_request,
     looks_like_document_download_request,
 )
@@ -53,12 +54,65 @@ _HELP_CLOSINGS = [
     "Glad to help anytime you need more support.",
 ]
 _STYLE_HINTS = [
-    "Use a short direct answer first, then 3-5 concise bullets.",
+    "Start with a direct one-line answer, then add 3-6 focused bullets with concrete details.",
     "Use a compact summary paragraph, then grouped bullets by category.",
-    "Use a mini checklist style with numbered steps when useful.",
-    "Use concise subheadings with 1-2 bullets each.",
-    "Keep it brief and practical with minimal headings.",
+    "Use concise subheadings with 1-3 bullets each and avoid repeating heading names from previous turns.",
+    "Keep it practical and specific; include what the user should do next in plain language.",
+    "Vary sentence openings and list wording so it feels conversational, not templated.",
 ]
+_PROCESS_STYLE_HINTS = [
+    "For process/how-to requests, provide 4-6 steps and add a short 'why this matters' note for important steps.",
+    "Explain the flow in phases (Before you start, Submit, After submission) with concise actionable bullets.",
+    "Use a checklist style, but add brief context under each step so users understand the purpose.",
+    "Include common mistakes or delays to avoid when relevant, using 1-2 compact bullets.",
+]
+_FOLLOWUP_STYLE_HINTS = [
+    "Treat short follow-ups as continuation of prior context and answer directly without repeating generic intros.",
+    "Keep follow-up responses concise but specific, with one short context reminder only if needed.",
+]
+_STYLE_TAGS = {
+    "numbered": re.compile(r"(^|\n)\s*\d+\.\s", re.IGNORECASE),
+    "key_points": re.compile(r"\bkey points\b", re.IGNORECASE),
+    "overview": re.compile(r"(^|\n)\s*#+\s*overview\b", re.IGNORECASE),
+    "subheading": re.compile(r"(^|\n)\s*#+\s+\w+", re.IGNORECASE),
+}
+
+
+def _detect_style_tags(text: str) -> set[str]:
+    t = text or ""
+    found: set[str] = set()
+    for name, pat in _STYLE_TAGS.items():
+        if pat.search(t):
+            found.add(name)
+    return found
+
+
+def build_style_hint(query: str, history: List[Dict[str, str]]) -> str:
+    qn = _norm(query)
+    last_assistant = last_assistant_message(history)
+    last_tags = _detect_style_tags(last_assistant)
+
+    pool: List[str] = list(_STYLE_HINTS)
+    if _is_actionable_query(query):
+        pool.extend(_PROCESS_STYLE_HINTS)
+    if len(qn.split()) <= 4 or is_affirmative_reply(query):
+        pool.extend(_FOLLOWUP_STYLE_HINTS)
+
+    filtered: List[str] = []
+    for hint in pool:
+        h = hint.lower()
+        if "numbered" in h and "numbered" in last_tags:
+            continue
+        if "key points" in h and "key_points" in last_tags:
+            continue
+        if "subheading" in h and "subheading" in last_tags:
+            continue
+        if "overview" in h and "overview" in last_tags:
+            continue
+        filtered.append(hint)
+
+    candidates = filtered or pool
+    return random.choice(candidates)
 
 # =========================
 # Social intents
@@ -272,6 +326,44 @@ def is_affirmative_reply(q: str) -> bool:
         return False
     return qn in {"yes", "yeah", "yep", "sure", "ok", "okay", "please", "alright"}
 
+
+_FOLLOWUP_FRAGMENT_WORDS = {
+    "this", "that", "it", "those", "these", "same", "more", "details",
+    "types", "type", "options", "option", "process", "procedure",
+    "how", "what about", "and this", "for this", "for that",
+}
+_BIL_CONTEXT_TERMS = {
+    "bil", "insurance", "loan", "claim", "form", "forms", "policy", "premium",
+    "motor", "fire", "travel", "engineering", "aviation", "marine", "liability",
+    "ppf", "gf", "gfm", "provident", "gratuity", "download", "document",
+}
+
+
+def is_contextual_followup_fragment(q: str) -> bool:
+    qn = _norm(q)
+    if not qn:
+        return False
+    if qn in _FOLLOWUP_FRAGMENT_WORDS:
+        return True
+    words = qn.split()
+    if len(words) <= 5 and any(w in {"this", "that", "it", "these", "those"} for w in words):
+        return True
+    if len(words) <= 3 and any(w in {"more", "details", "types", "options"} for w in words):
+        return True
+    return False
+
+
+def has_recent_bil_context(history: List[Dict[str, str]], window: int = 6) -> bool:
+    if not history:
+        return False
+    for m in history[-window:]:
+        content = _norm(m.get("content") or "")
+        if not content:
+            continue
+        if any(re.search(rf"\b{re.escape(t)}\b", content) for t in _BIL_CONTEXT_TERMS):
+            return True
+    return False
+
 def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
     qn = _norm(q)
     expanded = [qn]
@@ -303,6 +395,18 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
         if topic and topic != qn:
             expanded.append(f"{qn} {topic}")
 
+    # Generic continuation handling: follow-up fragments should inherit the prior topic.
+    if is_contextual_followup_fragment(q):
+        topic = _norm(last_user_topic(history))
+        if topic and topic != qn:
+            expanded.append(f"{topic} {qn}")
+            expanded.append(topic)
+
+    # If recent context is BIL and query is short, bias retrieval toward BIL semantics
+    # even without explicit keywords.
+    if has_recent_bil_context(history) and is_contextual_followup_fragment(q) and "bil" not in qn:
+        expanded.append(f"{qn} bhutan insurance limited")
+
     seen = set()
     out = []
     for part in expanded:
@@ -331,27 +435,77 @@ def should_promote_unrelated_to_bil(
     if looks_like_form_download_request(q) or is_vague_form_request(q):
         return False, []
 
-    probe_query = build_retrieval_query(q, history)
-    try:
-        probe_json = bil_retrieve_context.run(probe_query)
-        probe_obj = json.loads(probe_json)
-    except Exception:
-        return False, []
-
-    chunks = probe_obj.get("chunks", []) or []
-    if not chunks:
-        return False, []
-
-    best = 0.0
-    for c in chunks:
+    def _probe(query_text: str) -> List[Dict[str, Any]]:
         try:
-            best = max(best, float(c.get("score", 0.0)))
+            probe_json = bil_retrieve_context.run(query_text)
+            probe_obj = json.loads(probe_json)
+            return probe_obj.get("chunks", []) or []
         except Exception:
-            continue
+            return []
 
+    def _best_score(chunks: List[Dict[str, Any]]) -> float:
+        best_local = 0.0
+        for c in chunks:
+            try:
+                best_local = max(best_local, float(c.get("score", 0.0)))
+            except Exception:
+                continue
+        return best_local
+
+    generic_noise = {
+        "tell", "about", "what", "which", "where", "when", "why", "how",
+        "for", "the", "and", "with", "this", "that", "these", "those",
+        "more", "detail", "details", "please", "need", "want",
+    }
+    raw_tokens = [
+        t for t in re.findall(r"[a-z0-9]+", _norm(q))
+        if len(t) > 2 and t not in generic_noise
+    ]
+
+    def _lexical_hits(chunks: List[Dict[str, Any]], tokens: List[str]) -> int:
+        if not chunks or not tokens:
+            return 0
+        best_hits = 0
+        for c in chunks:
+            hay = (
+                f"{c.get('title','')} "
+                f"{c.get('source','')} "
+                f"{str(c.get('content',''))[:1400]}"
+            ).lower()
+            hits = sum(1 for t in tokens if t in hay)
+            best_hits = max(best_hits, hits)
+        return best_hits
+
+    # First probe with raw query only (avoids context contamination on truly unrelated asks).
+    raw_chunks = _probe(q)
+    raw_best = _best_score(raw_chunks)
+    raw_hits = _lexical_hits(raw_chunks, raw_tokens)
+    if raw_best >= max(settings.min_relevance, 0.24) and (not raw_tokens or raw_hits >= 1):
+        return True, raw_chunks
+
+    # Only run context-expanded rescue for explicit continuation fragments.
+    q_words = _norm(q).split()
+    can_use_context_rescue = is_contextual_followup_fragment(q)
+    if not can_use_context_rescue:
+        return False, []
+
+    probe_query = build_retrieval_query(q, history)
+    ctx_chunks = _probe(probe_query)
+    if not ctx_chunks:
+        return False, []
+
+    best = _best_score(ctx_chunks)
     min_strong = max(settings.min_relevance, 0.26)
+    if has_recent_bil_context(history):
+        min_strong -= 0.06
+    if is_contextual_followup_fragment(q):
+        min_strong -= 0.05
+    if len(q_words) <= 3:
+        min_strong -= 0.03
+    min_strong = max(0.14, min_strong)
+
     if best >= min_strong:
-        return True, chunks
+        return True, ctx_chunks
     return False, []
 
 def is_direct_question(q: str) -> bool:
@@ -469,14 +623,387 @@ def build_document_query_variants(user_query: str, history: List[Dict[str, str]]
     return out[:8]
 
 
+_ACTION_CUES = {
+    "how",
+    "process",
+    "procedure",
+    "step",
+    "steps",
+    "apply",
+    "application",
+    "claim",
+    "claims",
+    "required",
+    "requirement",
+    "requirements",
+    "document",
+    "documents",
+    "form",
+    "download",
+    "register",
+}
+
+_PRODUCT_HINTS = {
+    "motor": {"motor", "vehicle", "car", "auto"},
+    "fire": {"fire"},
+    "travel": {"travel"},
+    "loan": {"loan", "housing", "transport", "personal", "contractor", "tourism", "hotel", "agriculture", "livestock", "shares", "securities"},
+    "ppf": {"ppf", "provident", "gratuity", "gf", "gfm"},
+}
+
+_LINK_STOPWORDS = {
+    "how", "do", "to", "the", "a", "an", "is", "are", "and", "for", "of", "in", "on",
+    "with", "bil", "bhutan", "insurance", "limited", "what", "which", "tell", "about",
+    "me", "please", "claim", "claims", "loan", "loans", "policy", "policies",
+}
+
+_DEFAULT_FORMS_LINK = {"title": "Download Forms", "url": "https://www.bil.bt/help-and-support/download-forms"}
+_CLAIM_PAGE_LINKS = {
+    "motor": {"title": "Motor Insurance Claim", "url": "https://www.bil.bt/claim/motor-insurance-claim"},
+    "fire": {"title": "Fire Insurance Claim", "url": "https://www.bil.bt/claim/fire-insurance-claim"},
+    "travel": {"title": "Travel Insurance Claim", "url": "https://www.bil.bt/claim/travel-insurance-claim"},
+    "engineering": {"title": "Engineering Insurance Claim", "url": "https://www.bil.bt/claim/engineering-insurance-claim"},
+    "aviation": {"title": "Aviation Insurance Claim", "url": "https://www.bil.bt/claim/aviation-insurance-claim"},
+    "marine": {"title": "Marine Insurance Claim", "url": "https://www.bil.bt/claim/marine-insurance-claim"},
+    "liability": {"title": "Liability Insurance Claim", "url": "https://www.bil.bt/claim/liability-insurance-claim"},
+    "misc": {"title": "Miscellaneous Insurance Claim", "url": "https://www.bil.bt/claim/miscellaneous-insurance-claim"},
+}
+_PRODUCT_PAGE_LINKS = {
+    "motor": {"title": "Motor Insurance", "url": "https://www.bil.bt/insurance/motor-insurance"},
+    "fire": {"title": "Fire Insurance", "url": "https://www.bil.bt/insurance/fire-insurance"},
+    "travel": {"title": "Travel Insurance", "url": "https://www.bil.bt/insurance/travel-insurance"},
+    "engineering": {"title": "Engineering Insurance", "url": "https://www.bil.bt/insurance/engineering"},
+    "aviation": {"title": "Aviation Insurance", "url": "https://www.bil.bt/insurance/aviation-insurance"},
+    "marine": {"title": "Marine Insurance", "url": "https://www.bil.bt/insurance/marine-insurance"},
+    "liability": {"title": "Liability Insurance", "url": "https://www.bil.bt/insurance/liability-insurance"},
+    "misc": {"title": "Miscellaneous Insurance", "url": "https://www.bil.bt/insurance/miscellaneous-insurance"},
+}
+_LOAN_PAGE_LINKS = [
+    ({"personal"}, {"title": "Personal Loan", "url": "https://www.bil.bt/loans/personal-loan"}),
+    ({"housing"}, {"title": "Housing Loan", "url": "https://www.bil.bt/loans/housing-loan"}),
+    ({"transport", "vehicle"}, {"title": "Transport Loan", "url": "https://www.bil.bt/loans/transport-loan"}),
+    ({"agriculture", "livestock", "farm"}, {"title": "Agriculture and Livestock Loan", "url": "https://www.bil.bt/loans/agriculture-and-livestock"}),
+    ({"hotel", "tourism"}, {"title": "Hotel and Tourism Loan", "url": "https://www.bil.bt/loans/hotel-tourism-loan"}),
+    ({"contractor", "contractors"}, {"title": "Loans to Contractors", "url": "https://www.bil.bt/loans/loans-to-contractors"}),
+    ({"shares", "securities"}, {"title": "Loan for Shares and Securities", "url": "https://www.bil.bt/loans/loan-for-shares-securities"}),
+    ({"service"}, {"title": "Service Sector Loan", "url": "https://www.bil.bt/loans/service-sector-loan"}),
+    ({"trade", "commerce"}, {"title": "Trade and Commerce Loan", "url": "https://www.bil.bt/loans/trade-commerce-loan"}),
+    ({"production", "manufacturing", "industry", "industrial"}, {"title": "Production and Manufacturing Loan", "url": "https://www.bil.bt/loans/production-manufacturing-loan"}),
+    ({"forestry", "logging"}, {"title": "Forestry and Logging Loan", "url": "https://www.bil.bt/loans/forestry-logging-loan"}),
+    ({"mining", "quarrying"}, {"title": "Mining and Quarrying Loan", "url": "https://www.bil.bt/loans/mining-quarrying-loan"}),
+]
+_EXTRA_PRODUCT_WORDS = {
+    "engineering": {"engineering", "contractor", "erection", "machinery"},
+    "aviation": {"aviation", "aircraft"},
+    "marine": {"marine", "cargo", "transit"},
+    "liability": {"liability", "third-party", "third", "party", "workmen", "workman", "compensation"},
+    "misc": {"miscellaneous", "student", "sports", "fidelity", "burglary"},
+}
+
+
+def _is_actionable_query(q: str) -> bool:
+    qn = _norm(q)
+    if not qn:
+        return False
+    toks = set(qn.split())
+    return bool(_ACTION_CUES & toks)
+
+
+def _query_products(text: str) -> set[str]:
+    qn = _norm(text)
+    found = set()
+    for label, words in _PRODUCT_HINTS.items():
+        if any(re.search(rf"\b{re.escape(w)}\b", qn) for w in words):
+            found.add(label)
+    return found
+
+
+def _infer_products(q: str, history: List[Dict[str, str]]) -> set[str]:
+    found = _query_products(q)
+    if found:
+        return found
+
+    topic = last_user_topic(history)
+    if topic:
+        return _query_products(topic)
+    return set()
+
+
+def _derive_action_form_queries(q: str, history: List[Dict[str, str]]) -> List[str]:
+    products = _infer_products(q, history)
+    qn = _norm(q)
+    is_claim = "claim" in qn
+    explicit_form_ask = looks_like_form_request(q) or looks_like_form_download_request(q)
+
+    candidates: List[str] = []
+    if "motor" in products:
+        if is_claim:
+            candidates += ["motor claim form", "claim intimation form"]
+        else:
+            candidates += ["motor proposal form"]
+    if "fire" in products:
+        if is_claim:
+            candidates += ["fire claim form", "claim intimation form"]
+        else:
+            candidates += ["fire insurance proposal form"]
+    if "travel" in products:
+        if is_claim:
+            candidates += ["claim intimation form"]
+        else:
+            candidates += ["travel insurance proposal form"]
+    if "loan" in products:
+        if is_claim:
+            candidates += ["loan protection claim form"]
+        else:
+            candidates += ["loan application form"]
+    if "ppf" in products:
+        candidates += ["ppf mou", "change of nominee form"]
+
+    if is_claim and not candidates:
+        candidates += ["claim intimation form"]
+
+    if explicit_form_ask:
+        candidates += build_form_query_variants(q, history)
+
+    seen = set()
+    out: List[str] = []
+    for c in candidates:
+        c = _norm(c)
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out[:8]
+
+
+def _dedupe_downloads(items: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, str]]:
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for d in items or []:
+        if not isinstance(d, dict):
+            continue
+        url = (d.get("url") or "").strip()
+        if not url:
+            continue
+        key = url.lower().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        title = (d.get("title") or "").strip() or "Download"
+        out.append({"title": title, "url": url})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _gather_action_downloads(q: str, history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    candidates = _derive_action_form_queries(q, history)
+    if not candidates:
+        return []
+
+    qn = _norm(q)
+    is_claim = "claim" in qn
+    explicit_form_ask = looks_like_form_request(q) or looks_like_form_download_request(q)
+
+    merged: List[Dict[str, str]] = []
+    for cq in candidates:
+        try:
+            obj = json.loads(bil_get_forms.run(cq))
+        except Exception:
+            continue
+        for m in (obj.get("matches") or []):
+            if isinstance(m, dict):
+                merged.append({"title": m.get("title", ""), "url": m.get("url", "")})
+        if len(merged) >= 8:
+            break
+
+    deduped = _dedupe_downloads(merged, limit=8)
+    if explicit_form_ask:
+        return deduped[:6]
+
+    filtered: List[Dict[str, str]] = []
+    for d in deduped:
+        t = f"{d.get('title','')} {d.get('url','')}".lower()
+        if is_claim and "proposal" in t:
+            continue
+        if not is_claim and ("claim" in t or "intimation" in t):
+            continue
+        filtered.append(d)
+    return filtered[:6]
+
+
+def _is_file_link(url: str) -> bool:
+    u = (url or "").lower().split("?")[0]
+    return ("/document/forms/" in u) or u.endswith((".pdf", ".doc", ".docx"))
+
+
+def _extract_action_links(
+    chunks: List[Dict[str, Any]],
+    q: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    limit: int = 3,
+) -> List[Dict[str, str]]:
+    q_tokens = [
+        t for t in re.findall(r"[a-z0-9]+", _norm(q))
+        if len(t) > 2 and t not in _LINK_STOPWORDS
+    ]
+    q_products = _infer_products(q, history or [])
+
+    seen = set()
+    scored: List[tuple[float, Dict[str, str]]] = []
+    for c in chunks or []:
+        url = str(c.get("source") or "").strip()
+        if not url or not url.startswith("http") or _is_file_link(url):
+            continue
+
+        key = url.lower().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+
+        title = re.sub(r"\s+", " ", str(c.get("title") or "").strip())
+        hay = f"{title} {url}".lower()
+
+        overlap = sum(1 for t in q_tokens if t in hay)
+        if q_tokens and overlap == 0:
+            continue
+
+        score = float(c.get("score") or 0.0) + (0.12 * min(3, overlap))
+        if q_products:
+            c_products = _query_products(hay)
+            if c_products & q_products:
+                score += 0.20
+            elif c_products:
+                continue
+
+        pretty = title or "BIL Resource"
+        pretty = re.sub(r"\s*[\-|]\s*Bhutan Insurance Limited\s*$", "", pretty, flags=re.IGNORECASE).strip()
+        scored.append((score, {"title": pretty or "BIL Resource", "url": url}))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in scored[:limit]]
+
+
+def _dedupe_links(items: List[Dict[str, str]], limit: int = 3) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        url = (item.get("url") or "").strip()
+        if not url:
+            continue
+        key = url.lower().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        title = (item.get("title") or "").strip() or "BIL Resource"
+        out.append({"title": title, "url": url})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _extract_extra_products(text: str) -> set[str]:
+    qn = _norm(text)
+    found = set()
+    for label, words in _EXTRA_PRODUCT_WORDS.items():
+        if any(re.search(rf"\b{re.escape(w)}\b", qn) for w in words):
+            found.add(label)
+    return found
+
+
+def _fallback_action_links(q: str, history: List[Dict[str, str]], limit: int = 3) -> List[Dict[str, str]]:
+    qn = _norm(q)
+    history_topic = _norm(last_user_topic(history))
+    merged_text = f"{qn} {history_topic}".strip()
+    products = _infer_products(merged_text, history) | _extract_extra_products(merged_text)
+
+    is_claim_flow = any(k in qn for k in ["claim", "intimation", "settlement"])
+    links: List[Dict[str, str]] = []
+
+    if is_claim_flow:
+        for p in ["motor", "fire", "travel", "engineering", "aviation", "marine", "liability", "misc"]:
+            if p in products and p in _CLAIM_PAGE_LINKS:
+                links.append(_CLAIM_PAGE_LINKS[p])
+        # Claims generally need forms too.
+        links.append(_DEFAULT_FORMS_LINK)
+        return _dedupe_links(links, limit=limit)
+
+    # Product info / application flow pages.
+    for p in ["motor", "fire", "travel", "engineering", "aviation", "marine", "liability", "misc"]:
+        if p in products and p in _PRODUCT_PAGE_LINKS:
+            links.append(_PRODUCT_PAGE_LINKS[p])
+
+    if "loan" in products or "loan" in merged_text.split():
+        matched_loan_link = None
+        for keys, link in _LOAN_PAGE_LINKS:
+            if any(k in merged_text.split() for k in keys):
+                matched_loan_link = link
+                break
+        if matched_loan_link:
+            links.append(matched_loan_link)
+        else:
+            # Generic loan fallback: safest broad page among indexed loan pages.
+            links.append({"title": "Personal Loan", "url": "https://www.bil.bt/loans/personal-loan"})
+
+    if any(k in merged_text for k in ["ppf", "provident", "gratuity", "gf", "gfm"]):
+        links.append(_DEFAULT_FORMS_LINK)
+
+    # For process/apply requests, forms page is often useful.
+    if any(k in qn for k in ["apply", "application", "proposal", "form", "document", "download"]):
+        links.append(_DEFAULT_FORMS_LINK)
+
+    return _dedupe_links(links, limit=limit)
+
+
+def _md_has_links(md: str) -> bool:
+    return bool(re.search(r"\[[^\]]+\]\(https?://", md or "", flags=re.IGNORECASE))
+
+
+def _format_action_context(links: List[Dict[str, str]], downloads: List[Dict[str, str]]) -> str:
+    if not links and not downloads:
+        return "No additional action resources."
+    lines: List[str] = []
+    if links:
+        lines.append("LINKS:")
+        for l in links[:3]:
+            lines.append(f"- {l.get('title','Resource')}: {l.get('url','')}")
+    if downloads:
+        lines.append("DOWNLOADS:")
+        for d in downloads[:4]:
+            lines.append(f"- {d.get('title','Download')}: {d.get('url','')}")
+    return "\n".join(lines)
+
+
+def _append_links_to_answer_md(md: str, links: List[Dict[str, str]], has_downloads: bool) -> str:
+    body = (md or "").strip()
+    if links and not _md_has_links(body):
+        lines = ["**Helpful links**"]
+        for l in links[:3]:
+            t = (l.get("title") or "BIL Resource").strip()
+            u = (l.get("url") or "").strip()
+            if u:
+                lines.append(f"- [{t}]({u})")
+        body = (body + "\n\n" + "\n".join(lines)).strip() if body else "\n".join(lines)
+
+    if has_downloads and "attached below" not in body.lower():
+        body = (body + "\n\nDownloadable files are attached below.").strip() if body else "Downloadable files are attached below."
+
+    return body
+
+
 def enforce_downloads_rules(data: Dict[str, Any], user_query: str) -> None:
     """
-    HARD RULE: only include downloads if user is actually requesting forms in THIS turn.
-    Prevents random forms appearing for normal product Qs.
+    Keep downloads controlled:
+    - explicit form/document download asks are allowed
+    - actionable process/claim/application queries may include relevant attachments
+    - simple informational asks should not include random files
     """
     form_download_now = looks_like_form_download_request(user_query) or is_vague_form_request(user_query)
     doc_download_now = looks_like_document_download_request(user_query)
-    if not form_download_now and not doc_download_now:
+    actionable_now = _is_actionable_query(user_query)
+    if not form_download_now and not doc_download_now and not actionable_now:
         data["downloads"] = []
         # also ensure we don't label it form_request accidentally
         if data.get("intent") == "form_request":
@@ -555,7 +1082,7 @@ KNOWN CONTACT INFO (use when asked):
 OUTPUT (MUST FOLLOW):
 - Return ONLY valid JSON that matches the schema exactly.
 - Do NOT include URLs or links in answer.
-- You MAY include official BIL or app store URLs in answer_md when the user explicitly asks for resources, claims, contact info, or links.
+- You SHOULD include official BIL links in answer_md whenever they help complete the user task.
 - Do NOT include sources in the user-facing text.
 - If the user requests forms/documents, do NOT list form names in text. Provide them ONLY via downloads[].
 
@@ -570,12 +1097,16 @@ BEHAVIOR:
 - For BIL questions: answer ONLY using retrieved context.
 - If context is missing, set intent="not_found" and ask ONE clarifying question.
 - For unrelated questions: set intent="unrelated" and gently redirect.
+- For process/how-to/application/claim questions, provide one complete response in a single message:
+  1) clear flow/steps, 2) short explanation for why each major step matters, 3) key requirements/documents (if known), 4) helpful links from ACTIONABLE RESOURCES, 5) mention downloads if attached.
 
 DYNAMIC RESPONSE STYLE (IMPORTANT):
 - Match the response style to the user’s intent and how they asked.
 - First line must directly address the user’s main ask.
 - Do not repeat the same response pattern every turn; vary structure naturally.
 - Use RECENT CHAT CONTEXT to interpret follow-up fragments and to avoid monotonous formatting.
+- Do not rely on exact keywords only; infer semantically similar asks and likely intent from context.
+- If the user asks for process/steps, explain slightly more than a bare checklist (brief rationale + practical notes).
 - Then choose ONE layout below for answer_md (pick the most suitable; do not use all):
 
 LAYOUT TOOLBOX (choose 1):
@@ -586,25 +1117,28 @@ LAYOUT TOOLBOX (choose 1):
    - Short intro then bullets under a heading.
 
 3) Steps Checklist (best for “how to”, “process”, “what to do”)
-   - Use numbered steps (1–5 max).
+   - Use numbered steps (3–6 max), with a short explanation line for key steps.
 
-4) Compare (best for “difference between”, “which is better”)
+4) Guided Flow (best for process explanations that need context)
+   - Use sections like "Before you start", "Do this", "After submission", each with concise bullets.
+
+5) Compare (best for “difference between”, “which is better”)
    - Use a small markdown table OR two subheadings.
 
-5) Requirements (best for “documents needed”, “eligibility”, “what do I need”)
+6) Requirements (best for “documents needed”, “eligibility”, “what do I need”)
    - Use a short list grouped by category.
 
-6) Options List (best for lists like products/loans)
+7) Options List (best for lists like products/loans)
    - Use subheadings per option with 2–3 bullets each (compact).
    
-7) Form Request Confirmation (best for form requests)
+8) Form Request Confirmation (best for form requests)
    - Confirm form found and available for download (no links).
    
-8) IF other scenarios: use your best judgment to pick a clear, concise format.
+9) IF other scenarios: use your best judgment to pick a clear, concise format.
 
 STYLE:
 - answer_md should use headings (if absolutely necessary), bullets, and line breaks for readability.
-- Keep it concise: prefer 1–2 short sections, max ~8 bullets total.
+- Keep it concise but complete: prefer 1–3 short sections, typically 5–10 bullets total.
 - Do NOT end with a question. If you add a closing, make it a brief helpful statement (no question) and vary the wording.
 - Avoid “brochure tone” for personal questions; sound like helpful support staff.
 - NO need to provide headers for all the answers; give headers for only the most relevant answers.
@@ -614,7 +1148,7 @@ Before finalizing:
 1) Did I answer the user’s exact ask in the first line?
 2) Did I choose the best ONE layout from the toolbox?
 3) Is answer_md clean and scannable?
-4) Did I avoid URLs/sources and avoid ending with a question?
+4) Did I avoid sources and avoid ending with a question?
 
 Return ONLY JSON matching this schema:
 {format_instructions}
@@ -623,7 +1157,7 @@ Return ONLY JSON matching this schema:
 prompt = ChatPromptTemplate.from_messages(
     [
         ("system", SYSTEM_TEMPLATE),
-        ("human", "USER QUERY:\n{query}\n\nRECENT CHAT CONTEXT:\n{history_context}\n\nSTYLE GUIDANCE:\n{style_hint}\n\nCONTEXT:\n{context}\n"),
+        ("human", "USER QUERY:\n{query}\n\nRECENT CHAT CONTEXT:\n{history_context}\n\nSTYLE GUIDANCE:\n{style_hint}\n\nACTIONABLE RESOURCES:\n{action_context}\n\nCONTEXT:\n{context}\n"),
     ]
 ).partial(format_instructions=parser.get_format_instructions())
 
@@ -694,6 +1228,11 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
     try:
         hint = bil_intent_hint.run(q)
     except Exception:
+        hint = "bil_query"
+
+    # Smart continuation: short follow-up fragments in an ongoing BIL thread should
+    # stay in BIL mode even when explicit product keywords are missing.
+    if hint == "unrelated" and has_recent_bil_context(history) and is_contextual_followup_fragment(q):
         hint = "bil_query"
 
     # Dynamic fallback: if hint says unrelated but retrieval confidence is strong,
@@ -840,7 +1379,17 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
 
     context = "\n\n".join([f"- {c.get('content','')}" for c in chunks[: settings.top_k]])
     history_context = build_recent_history_context(history)
-    style_hint = random.choice(_STYLE_HINTS)
+    style_hint = build_style_hint(q, history)
+
+    action_links: List[Dict[str, str]] = []
+    action_downloads: List[Dict[str, str]] = []
+    if _is_actionable_query(q):
+        action_links = _extract_action_links(chunks, q, history=history, limit=3)
+        if len(action_links) < 2:
+            fallback_links = _fallback_action_links(q, history, limit=3)
+            action_links = _dedupe_links(action_links + fallback_links, limit=3)
+        action_downloads = _gather_action_downloads(q, history)
+    action_context = _format_action_context(action_links, action_downloads)
 
     llm = _llm()
     msgs = prompt.format_messages(
@@ -848,19 +1397,37 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         context=context,
         history_context=history_context,
         style_hint=style_hint,
+        action_context=action_context,
     )
     out = llm.invoke(msgs).content or ""
 
     # Parse
     try:
         parsed = parser.parse(out)
-        return finalize(parsed.model_dump(), user_query=q)
+        parsed_obj = parsed.model_dump()
+        parsed_downloads = _dedupe_downloads(parsed_obj.get("downloads") or [], limit=6)
+        merged_downloads = _dedupe_downloads(parsed_downloads + action_downloads, limit=6)
+        parsed_obj["downloads"] = merged_downloads
+        parsed_obj["answer_md"] = _append_links_to_answer_md(
+            str(parsed_obj.get("answer_md", "")),
+            action_links,
+            bool(merged_downloads),
+        )
+        return finalize(parsed_obj, user_query=q)
     except Exception:
         try:
             candidate = extract_first_json_object(out)
             if candidate:
                 obj = json.loads(candidate)
                 if isinstance(obj, dict):
+                    parsed_downloads = _dedupe_downloads(obj.get("downloads") or [], limit=6)
+                    merged_downloads = _dedupe_downloads(parsed_downloads + action_downloads, limit=6)
+                    obj["downloads"] = merged_downloads
+                    obj["answer_md"] = _append_links_to_answer_md(
+                        str(obj.get("answer_md", "")),
+                        action_links,
+                        bool(merged_downloads),
+                    )
                     return finalize(obj, user_query=q)
         except Exception:
             pass

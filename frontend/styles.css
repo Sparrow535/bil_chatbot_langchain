@@ -558,13 +558,30 @@ select {
   flex: 1;
   text-align: center;
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: 600;
   color: #0b62c4;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.28;
+  padding: 1px 0;
+}
+.hint-inline span:first-child {
+  display: inline-block;
+  max-width: 100%;
+}
+.hint-inline--progress {
+  color: #0b62c4;
+}
+.hint-inline--info {
+  color: #245f95;
+}
+.hint-inline--error {
+  color: #c13515;
 }
 .hint-spinner {
   width: 14px;
@@ -754,6 +771,91 @@ select {
 .bubble li {
   margin-top: 6px;
   line-height: 1.4;
+}
+
+/* Helpful links inside bot messages */
+.incoming .bubble a.msg-link {
+  color: #0b57cb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.incoming .bubble .helpful-links-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-weight: 700;
+  color: #073983;
+}
+.incoming .bubble .helpful-links-title.helpful-links-title-pending {
+  display: none;
+}
+
+.incoming .bubble .helpful-links-title::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #0d77f2, #0b57cb);
+  box-shadow: 0 0 0 3px rgba(13, 119, 242, 0.14);
+}
+
+.incoming .bubble .helpful-links-list {
+  list-style: none;
+  padding-left: 0 !important;
+  margin-top: 8px !important;
+  display: grid;
+  gap: 8px;
+}
+.incoming .bubble .helpful-links-list.helpful-links-list-pending {
+  display: none;
+}
+
+.incoming .bubble li.msg-link-item {
+  list-style: none;
+  margin-top: 0 !important;
+}
+
+.incoming .bubble a.msg-link-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(11, 87, 203, 0.22);
+  background: rgba(255, 255, 255, 0.82);
+  color: #0a3f94;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
+}
+
+.incoming .bubble a.msg-link-chip::after {
+  content: "↗";
+  font-size: 12px;
+  opacity: 0.75;
+  flex: 0 0 auto;
+}
+
+.incoming .bubble a.msg-link-chip:hover {
+  border-color: rgba(11, 87, 203, 0.42);
+  background: #ffffff;
+  transform: translateY(-1px);
+}
+
+.incoming .bubble a.msg-link-chip.link-pending {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.incoming .bubble a.msg-link-chip.link-pending::after {
+  content: "";
 }
 
 /* Headings should NOT be huge */

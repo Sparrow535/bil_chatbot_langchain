@@ -10,6 +10,7 @@ from app.incremental import start_incremental_loop
 from openai import OpenAI
 import tempfile
 import os
+from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -21,6 +22,83 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SESSION_HISTORY = defaultdict(lambda: deque(maxlen=12))
 _incremental_started = False
+
+
+def _is_non_english_text(text: str) -> bool:
+    s = (text or "").strip()
+    if not s:
+        return False
+
+    total_letters = 0
+    latin_letters = 0
+    for ch in s:
+        if ch.isalpha():
+            total_letters += 1
+            if "a" <= ch.lower() <= "z":
+                latin_letters += 1
+
+    if total_letters == 0:
+        return False
+    return (latin_letters / total_letters) < 0.6
+
+
+def _transcribe_with_fallback(tmp_path: str) -> Tuple[str, str]:
+    preferred = (os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe") or "").strip()
+    fallback_raw = os.getenv("OPENAI_STT_FALLBACK_MODELS", "")
+    fallback_models = [m.strip() for m in fallback_raw.split(",") if m.strip()]
+    language: Optional[str] = (os.getenv("OPENAI_STT_LANGUAGE", "en") or "").strip() or None
+    prompt: Optional[str] = (os.getenv("OPENAI_STT_PROMPT", "") or "").strip() or None
+
+    candidates = [preferred] + fallback_models
+    if "gpt-4o-transcribe" not in candidates:
+        candidates.append("gpt-4o-transcribe")
+    if "whisper-1" not in candidates:
+        candidates.append("whisper-1")
+
+    deduped = []
+    seen = set()
+    for m in candidates:
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        deduped.append(m)
+
+    last_error = None
+    for model_name in deduped:
+        kwargs = {"model": model_name}
+        if language:
+            kwargs["language"] = language
+        # Prompt tends to help Whisper with domain names.
+        if prompt and model_name.startswith("whisper"):
+            kwargs["prompt"] = prompt
+
+        attempts = [kwargs]
+        if "prompt" in kwargs:
+            retry_no_prompt = dict(kwargs)
+            retry_no_prompt.pop("prompt", None)
+            attempts.append(retry_no_prompt)
+
+        for attempt_kwargs in attempts:
+            try:
+                with open(tmp_path, "rb") as f:
+                    resp = client.audio.transcriptions.create(file=f, **attempt_kwargs)
+                text = (getattr(resp, "text", None) or "").strip()
+                if not text:
+                    last_error = ValueError("Empty transcription text")
+                    continue
+
+                if language and language.lower().startswith("en") and _is_non_english_text(text):
+                    last_error = ValueError("Non-English transcription candidate")
+                    continue
+
+                return text, model_name
+            except Exception as e:
+                last_error = e
+                continue
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Transcription failed")
 
 
 app.add_middleware(
@@ -105,15 +183,9 @@ async def stt(file: UploadFile = File(...)):
         tmp.write(content)
 
     try:
-        # OpenAI Audio Transcriptions API :contentReference[oaicite:1]{index=1}
-        with open(tmp_path, "rb") as f:
-            transcription = client.audio.transcriptions.create(
-                model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe"),
-                file=f,
-                # language="en",  # optional
-            )
-
-        text = (getattr(transcription, "text", None) or "").strip()
+        text, used_model = _transcribe_with_fallback(tmp_path)
+        if os.getenv("DEBUG_CHAT", "0") == "1":
+            print(f"[stt] model={used_model} bytes={len(content)} text_len={len(text)}")
         return TranscribeResponse(text=text)
 
     except Exception as e:

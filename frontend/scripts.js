@@ -146,6 +146,10 @@
     const text = (msg || "").trim();
     const isTranscribing = /transcrib/i.test(text);
     const isCancelled = /cancel/i.test(text);
+    const isErrorLike =
+      /no voice|no clear voice|couldn['’]?t|failed|blocked|denied|not supported/i.test(
+        text,
+      );
 
     if (!text) {
       if (composerNormal) composerNormal.classList.remove("hinting");
@@ -197,6 +201,11 @@
       inline.className = "hint-inline";
       composerNormal.appendChild(inline);
     }
+    inline.classList.remove("hint-inline--progress", "hint-inline--error", "hint-inline--info");
+    if (isTranscribing) inline.classList.add("hint-inline--progress");
+    else if (isErrorLike) inline.classList.add("hint-inline--error");
+    else inline.classList.add("hint-inline--info");
+
     inline.innerHTML = `
       <span>${text}</span>
       ${isTranscribing ? '<span class="hint-spinner" aria-hidden="true"></span>' : ""}
@@ -389,6 +398,7 @@
 
     // Render markdown first, then type into text nodes so formatting is visible
     bubble.innerHTML = marked.parse(md);
+    enhanceMarkdownLinkUI(bubble);
 
     // Hide list markers until their text starts typing
     const listItems = bubble.querySelectorAll("li");
@@ -414,9 +424,31 @@
 
     for (const { node: n, text } of nodes) {
       const li = n.parentElement ? n.parentElement.closest("li") : null;
+      const linkChip = n.parentElement
+        ? n.parentElement.closest("a.msg-link-chip")
+        : null;
+      const pendingHelpfulTitle = n.parentElement
+        ? n.parentElement.closest(".helpful-links-title-pending")
+        : null;
+      const pendingHelpfulList = n.parentElement
+        ? n.parentElement.closest(".helpful-links-list-pending")
+        : null;
       for (let i = 0; i < text.length; i++) {
         const ch = text[i];
         n.textContent += ch;
+        if (pendingHelpfulTitle && ch.trim()) {
+          pendingHelpfulTitle.classList.remove("helpful-links-title-pending");
+        }
+        if (pendingHelpfulList && ch.trim()) {
+          pendingHelpfulList.classList.remove("helpful-links-list-pending");
+        }
+        if (
+          linkChip &&
+          linkChip.classList.contains("link-pending") &&
+          (n.textContent || "").trim()
+        ) {
+          linkChip.classList.remove("link-pending");
+        }
         if (li && li.classList.contains("li-typing") && ch.trim()) {
           li.classList.remove("li-typing");
         }
@@ -431,6 +463,43 @@
 
     bubble.classList.remove("is-typing");
     scrollToBottom();
+  }
+
+  function enhanceMarkdownLinkUI(bubble) {
+    if (!bubble) return;
+
+    const cleanup = (s) =>
+      (s || "").toLowerCase().replace(/\s+/g, " ").replace(/[:\s]+$/, "").trim();
+
+    const markHelpfulLinksList = (titleEl) => {
+      if (!titleEl) return;
+      const p = titleEl.closest("p") || titleEl;
+      p.classList.add("helpful-links-title", "helpful-links-title-pending");
+      const next = p.nextElementSibling;
+      if (next && (next.tagName === "UL" || next.tagName === "OL")) {
+        next.classList.add("helpful-links-list", "helpful-links-list-pending");
+      }
+    };
+
+    bubble.querySelectorAll("p, h1, h2, h3, h4, h5, h6, strong, b").forEach((el) => {
+      if (cleanup(el.textContent) === "helpful links") {
+        markHelpfulLinksList(el);
+      }
+    });
+
+    bubble.querySelectorAll("a[href]").forEach((a) => {
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.classList.add("msg-link");
+
+      const li = a.closest("li");
+      if (!li) return;
+      const inHelpfulList = !!li.closest(".helpful-links-list");
+      if (inHelpfulList) {
+        li.classList.add("msg-link-item");
+        a.classList.add("msg-link-chip", "link-pending");
+      }
+    });
   }
 
   // =====================
@@ -511,7 +580,13 @@
 
   async function transcribeAudio(blob) {
     const fd = new FormData();
-    fd.append("file", blob, "voice.webm");
+    const mime = String(blob?.type || "").toLowerCase();
+    let ext = "webm";
+    if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
+    else if (mime.includes("ogg")) ext = "ogg";
+    else if (mime.includes("wav")) ext = "wav";
+    else if (mime.includes("mpeg") || mime.includes("mp3")) ext = "mp3";
+    fd.append("file", blob, `voice.${ext}`);
 
     const res = await fetch(STT_URL, { method: "POST", body: fd });
     if (!res.ok) {
@@ -598,14 +673,34 @@
   let audioContext = null;
   let analyser = null;
   let dataArray = null;
+  let timeDataArray = null;
+  let meterSink = null;
+  let meterMaxRms = 0;
+  let meterRmsSum = 0;
+  let meterRmsCount = 0;
+  let meterSignalFrames = 0;
   let rafId = null;
   let mediaStream = null;
-  const bars = Array.from(ROOT.querySelectorAll(".sound-bars span"));
+  let bars = Array.from(ROOT.querySelectorAll(".sound-bars span"));
 
   // real recording (MediaRecorder) -> STT backend
   let recorder = null;
+  let recorderStream = null;
   let chunks = [];
   let recordingCanceled = false;
+  let autoSendAfterTranscribe = false;
+  let sttInFlight = null;
+  let recordingMimeType = "audio/webm";
+  let holdToTalkRecording = false;
+  let micPressTimer = null;
+  let micPressPointerId = null;
+  let micPressActive = false;
+  let micLongPressStarted = false;
+  const MIC_LONG_PRESS_MS = 280;
+  const VAD_MIN_MAX_RMS = 0.0085;
+  const VAD_MIN_AVG_RMS = 0.0025;
+  const VAD_MIN_SIGNAL_FRAMES = 5;
+  const VAD_MIN_SIGNAL_RATIO = 0.045;
 
   function formatTime(ms) {
     const total = Math.floor(ms / 1000);
@@ -627,43 +722,120 @@
     timerInterval = null;
   }
 
-  function setComposerMode(mode) {
+  function setComposerMode(mode, opts = {}) {
     const recording = mode === "recording";
+    const holdMode = recording && Boolean(opts.holdToTalk);
     composerNormal.classList.toggle("hidden", recording);
     composerRecording.classList.toggle("hidden", !recording);
+    composerRecording.classList.toggle("hold-mode", holdMode);
+    recCancelBtn.classList.toggle("hidden", holdMode);
+    recSendBtn.classList.toggle("hidden", holdMode);
+    if (!holdMode) {
+      recSendBtn.textContent = "■";
+      recSendBtn.setAttribute("aria-label", "Stop recording");
+      recSendBtn.setAttribute("title", "Stop recording");
+    }
     if (!recording) setTimeout(() => inputEl.focus(), 30);
   }
 
-  async function startAudioMeter() {
-    if (!navigator.mediaDevices?.getUserMedia || !bars.length) return;
+  function pickRecordingMimeType() {
+    if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== "function") {
+      return "";
+    }
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus",
+    ];
+    for (const c of candidates) {
+      if (MediaRecorder.isTypeSupported(c)) return c;
+    }
+    return "";
+  }
+
+  function computeRms(arr) {
+    if (!arr || !arr.length) return 0;
+    let sum = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const n = (arr[i] - 128) / 128;
+      sum += n * n;
+    }
+    return Math.sqrt(sum / arr.length);
+  }
+
+  async function startAudioMeter(stream) {
+    if (!stream) return;
     try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStream = stream;
+      bars = Array.from(ROOT.querySelectorAll(".sound-bars span"));
+      if (!bars.length) return;
 
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioContext.state === "suspended") {
+        try {
+          await audioContext.resume();
+        } catch {}
+      }
       analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+      analyser.minDecibels = -92;
+      analyser.maxDecibels = -16;
 
       const source = audioContext.createMediaStreamSource(mediaStream);
       source.connect(analyser);
+      // Keep the WebAudio graph active on browsers that pause unconnected analyzers.
+      meterSink = audioContext.createGain();
+      meterSink.gain.value = 0;
+      analyser.connect(meterSink);
+      meterSink.connect(audioContext.destination);
 
       dataArray = new Uint8Array(analyser.frequencyBinCount);
+      timeDataArray = new Uint8Array(analyser.fftSize);
+      meterMaxRms = 0;
+      meterRmsSum = 0;
+      meterRmsCount = 0;
+      meterSignalFrames = 0;
 
       const update = () => {
+        if (!analyser || !dataArray || !timeDataArray) return;
         analyser.getByteFrequencyData(dataArray);
+        analyser.getByteTimeDomainData(timeDataArray);
+        const rms = computeRms(timeDataArray);
+        meterMaxRms = Math.max(meterMaxRms, rms);
+        meterRmsSum += rms;
+        meterRmsCount += 1;
+        if (rms > 0.0075) meterSignalFrames += 1;
+        const rmsBoost = Math.min(1, rms * 30);
         const step = Math.floor(dataArray.length / bars.length) || 1;
+        const tStep = Math.floor(timeDataArray.length / bars.length) || 1;
 
         for (let i = 0; i < bars.length; i++) {
-          const idx = i * step;
-          const v = dataArray[idx] || 0;
-          const scale = 0.5 + (v / 255) * 2.0;
+          const from = i * step;
+          const to = Math.min(dataArray.length, from + step);
+          let bucket = 0;
+          for (let j = from; j < to; j++) bucket += dataArray[j] || 0;
+          const bucketAvg = to > from ? bucket / (to - from) : 0;
+          const vFreq = bucketAvg / 255;
+          const tFrom = i * tStep;
+          const tTo = Math.min(timeDataArray.length, tFrom + tStep);
+          let absSum = 0;
+          for (let j = tFrom; j < tTo; j++) {
+            absSum += Math.abs((timeDataArray[j] - 128) / 128);
+          }
+          const vTime = tTo > tFrom ? Math.min(1, (absSum / (tTo - tFrom)) * 5.8) : 0;
+          const v = Math.max(vFreq, vTime, rmsBoost * (0.72 + (i % 3) * 0.08));
+          const scale = 0.5 + v * 2.25;
           bars[i].style.transform = `scaleY(${scale})`;
-          bars[i].style.opacity = `${0.55 + (v / 255) * 0.45}`;
+          bars[i].style.opacity = `${0.50 + v * 0.5}`;
         }
 
         rafId = requestAnimationFrame(update);
       };
       update();
     } catch (err) {
+      console.error("Audio meter error:", err);
       showHint("Mic access blocked. Audio bars will stay idle.");
     }
   }
@@ -672,10 +844,13 @@
     if (rafId) cancelAnimationFrame(rafId);
     rafId = null;
 
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((t) => t.stop());
-      mediaStream = null;
-    }
+    try {
+      if (analyser) analyser.disconnect();
+    } catch {}
+    try {
+      if (meterSink) meterSink.disconnect();
+    } catch {}
+    meterSink = null;
 
     if (audioContext) {
       audioContext.close();
@@ -684,6 +859,10 @@
 
     analyser = null;
     dataArray = null;
+    timeDataArray = null;
+    meterRmsSum = 0;
+    meterRmsCount = 0;
+    meterSignalFrames = 0;
 
     for (const bar of bars) {
       bar.style.transform = "";
@@ -691,37 +870,96 @@
     }
   }
 
-  async function beginRecording() {
+  function stopRecorderStreamTracks() {
+    if (recorderStream) {
+      recorderStream.getTracks().forEach((t) => t.stop());
+      recorderStream = null;
+    }
+    mediaStream = null;
+  }
+
+  async function beginRecording(opts = {}) {
     if (isRecording) return;
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      showHint("Voice recording is not supported on this device.");
+      setTimeout(() => showHint(""), 1400);
+      return;
+    }
 
     isRecording = true;
     recordingCanceled = false;
-    setComposerMode("recording");
+    autoSendAfterTranscribe = false;
+    recordingMimeType = "audio/webm";
+    meterMaxRms = 0;
+    meterRmsSum = 0;
+    meterRmsCount = 0;
+    meterSignalFrames = 0;
+    holdToTalkRecording = Boolean(opts.holdToTalk);
+    setComposerMode("recording", { holdToTalk: holdToTalkRecording });
     micBtn.classList.add("recording");
     showHint("");
     startTimer();
 
-    // start meter + recorder
-    await startAudioMeter();
-
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
+      recorderStream = stream;
       chunks = [];
-      recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      recordingMimeType = pickRecordingMimeType() || "audio/webm";
+
+      try {
+        if (recordingMimeType) {
+          recorder = new MediaRecorder(stream, {
+            mimeType: recordingMimeType,
+            audioBitsPerSecond: 128000,
+          });
+        } else {
+          recorder = new MediaRecorder(stream);
+        }
+      } catch {
+        recorder = new MediaRecorder(stream);
+        recordingMimeType = recorder.mimeType || "audio/webm";
+      }
+
+      await startAudioMeter(stream);
 
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) chunks.push(e.data);
       };
 
       recorder.onstop = async () => {
-        // stop tracks
-        stream.getTracks().forEach((t) => t.stop());
-
-        const blob = new Blob(chunks, { type: "audio/webm" });
+        stopRecorderStreamTracks();
+        const blob = new Blob(chunks, { type: recordingMimeType || "audio/webm" });
+        const durationMs = Math.max(0, Date.now() - startTime);
 
         if (recordingCanceled) {
           chunks = [];
           showHint("");
+          return;
+        }
+        if (!blob.size || blob.size < 300) {
+          showHint("No voice detected.");
+          setTimeout(() => showHint(""), 1200);
+          return;
+        }
+        const avgRms = meterRmsCount ? meterRmsSum / meterRmsCount : 0;
+        const signalRatio = meterRmsCount
+          ? meterSignalFrames / meterRmsCount
+          : 0;
+        const hasSpeechEnergy =
+          meterMaxRms >= VAD_MIN_MAX_RMS ||
+          avgRms >= VAD_MIN_AVG_RMS ||
+          (meterSignalFrames >= VAD_MIN_SIGNAL_FRAMES &&
+            signalRatio >= VAD_MIN_SIGNAL_RATIO);
+        if (!hasSpeechEnergy || (durationMs < 350 && meterMaxRms < 0.012)) {
+          showHint("No clear voice detected. Please check mic and try again.");
+          setTimeout(() => showHint(""), 1500);
           return;
         }
 
@@ -729,45 +967,68 @@
         showHint("Transcribing…");
 
         try {
-          const result = await transcribeAudio(blob);
-          const text = (result.text || "").trim();
+          sttInFlight = transcribeAudio(blob);
+          const result = await sttInFlight;
+          const text = String(result.text || "").trim();
           showHint("");
+          sttInFlight = null;
 
-          if (text) {
-            inputEl.value = text;
-            // auto-send like your design? (optional)
-            // sendMessage();
-          } else {
+          if (!text) {
             showHint("Couldn’t hear clearly.");
             setTimeout(() => showHint(""), 1200);
+            return;
+          }
+
+          // Guard against silence hallucinations like one-word outputs from near-silent audio.
+          const wordCount = text.split(/\s+/).filter(Boolean).length;
+          const probablySilenceHallucination =
+            wordCount <= 2 && signalRatio < 0.03 && meterMaxRms < 0.0115;
+          if (probablySilenceHallucination) {
+            showHint("No clear voice detected. Please try again.");
+            setTimeout(() => showHint(""), 1400);
+            return;
+          }
+
+          inputEl.value = text;
+          if (autoSendAfterTranscribe) {
+            await new Promise((r) => setTimeout(r, 80));
+            sendMessage();
           }
         } catch (e) {
+          sttInFlight = null;
+          console.error("Transcription failed:", e);
           showHint("Transcription failed.");
           setTimeout(() => showHint(""), 1400);
         }
       };
 
-      recorder.start();
+      recorder.start(250);
     } catch (err) {
+      console.error("Recording setup failed:", err);
       showHint("Mic permission denied.");
       endRecording(true);
     }
   }
 
-  function endRecording(cancel = false) {
+  function endRecording(cancel = false, opts = {}) {
     if (!isRecording) return;
+    const autoSend = Boolean(opts && opts.autoSend);
 
     isRecording = false;
     recordingCanceled = cancel;
+    autoSendAfterTranscribe = !cancel && autoSend;
     micBtn.classList.remove("recording");
     stopTimer();
     stopAudioMeter();
     setComposerMode("normal");
+    holdToTalkRecording = false;
 
     if (recorder && recorder.state !== "inactive") {
       try {
         recorder.stop();
       } catch {}
+    } else {
+      stopRecorderStreamTracks();
     }
 
     if (cancel) {
@@ -777,20 +1038,108 @@
     }
   }
 
-  micBtn.addEventListener("click", () => {
+  function clearMicPressTimer() {
+    if (micPressTimer) {
+      clearTimeout(micPressTimer);
+      micPressTimer = null;
+    }
+  }
+
+  function clearMicPressState() {
+    clearMicPressTimer();
+    micPressActive = false;
+    micPressPointerId = null;
+    micLongPressStarted = false;
+  }
+
+  function finishMicPress(pointerId) {
+    if (!micPressActive) return;
+    if (
+      micPressPointerId !== null &&
+      typeof pointerId === "number" &&
+      pointerId !== micPressPointerId
+    ) {
+      return;
+    }
+
+    const wasLongPress = micLongPressStarted;
+    clearMicPressState();
+
+    if (wasLongPress) {
+      if (isRecording) endRecording(false, { autoSend: true });
+      return;
+    }
+
     if (composerNormal && composerNormal.classList.contains("hinting")) {
       showHint("");
       return;
     }
-    beginRecording();
+
+    if (!isRecording && !sttInFlight) {
+      beginRecording({ holdToTalk: false });
+    }
+  }
+
+  function startMicPress(pointerId = null) {
+    if (isRecording || sttInFlight || micPressActive) return;
+
+    micPressActive = true;
+    micPressPointerId = typeof pointerId === "number" ? pointerId : null;
+    micLongPressStarted = false;
+    clearMicPressTimer();
+    micPressTimer = setTimeout(() => {
+      if (!micPressActive || isRecording || sttInFlight) return;
+      micLongPressStarted = true;
+      beginRecording({ holdToTalk: true });
+    }, MIC_LONG_PRESS_MS);
+  }
+
+  if (window.PointerEvent) {
+    micBtn.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      startMicPress(typeof e.pointerId === "number" ? e.pointerId : null);
+    });
+    window.addEventListener("pointerup", (e) => {
+      finishMicPress(typeof e.pointerId === "number" ? e.pointerId : null);
+    });
+    window.addEventListener("pointercancel", (e) => {
+      if (micLongPressStarted && isRecording) endRecording(true);
+      finishMicPress(typeof e.pointerId === "number" ? e.pointerId : null);
+    });
+  } else {
+    // Fallback for older browsers.
+    micBtn.addEventListener("touchstart", () => startMicPress(null), {
+      passive: true,
+    });
+    window.addEventListener("touchend", () => finishMicPress(null), {
+      passive: true,
+    });
+    window.addEventListener("touchcancel", () => {
+      if (micLongPressStarted && isRecording) endRecording(true);
+      finishMicPress(null);
+    });
+    micBtn.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      startMicPress(null);
+    });
+    window.addEventListener("mouseup", () => finishMicPress(null));
+  }
+
+  // Keyboard accessibility for the mic button.
+  micBtn.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    if (composerNormal && composerNormal.classList.contains("hinting")) {
+      showHint("");
+      return;
+    }
+    if (!isRecording && !sttInFlight) beginRecording({ holdToTalk: false });
   });
+
   recCancelBtn.addEventListener("click", () => endRecording(true));
   recSendBtn.addEventListener("click", () => {
-    // stop recording -> transcription fills input -> then send
-    endRecording(false);
-    setTimeout(() => {
-      if (inputEl.value.trim()) sendMessage();
-    }, 50);
+    // stop recording, then auto-send after transcription finishes
+    endRecording(false, { autoSend: true });
   });
 
   // =====================
