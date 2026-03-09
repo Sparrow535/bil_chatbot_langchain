@@ -120,12 +120,28 @@ def build_style_hint(query: str, history: List[Dict[str, str]]) -> str:
 _GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening", "kuzuzangpo", "kuzuzangpo la", "kuzu"}
 _FAREWELLS = {"bye", "goodbye", "see you", "see ya", "take care", "later", "okay", "ok"}
 _THANKS = {"thanks", "thank you", "thx", "thanks a lot", "appreciate it"}
+_TOPIC_PREFIX_RE = re.compile(
+    r"^(tell me about|tell me more about|tell me|explain|describe|what is|what are|"
+    r"give me info on|give me information on|information on|info on|details on|"
+    r"i want to know about|i need to know about|i need info on|i want info on|"
+    r"how to apply for|how do i apply for|how to claim for|how do i claim for)\s+",
+    re.IGNORECASE,
+)
 
 def _norm(s: str) -> str:
     s = (s or "").lower().strip()
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+def _compact_topic(text: str) -> str:
+    qn = _norm(text)
+    if not qn:
+        return ""
+    qn = _TOPIC_PREFIX_RE.sub("", qn)
+    qn = re.sub(r"\b(please|kindly|now|today)\b", "", qn)
+    qn = re.sub(r"\s+", " ", qn).strip()
+    return qn
 
 def normalize_query_aliases(text: str) -> str:
     t = (text or "").strip()
@@ -259,7 +275,7 @@ def extract_form_topic(q: str) -> str:
         return ""
     topic = m.group(2).strip()
     topic = re.sub(r"\b(this|that|it)\b", "", topic).strip()
-    return topic
+    return _compact_topic(topic)
 
 def last_user_topic(history: List[Dict[str, str]]) -> str:
     """
@@ -284,7 +300,7 @@ def last_user_topic(history: List[Dict[str, str]]) -> str:
         # ignore social chatter
         if _norm(txt) in {"hi", "hello", "hey", "bye", "thanks", "thank you", "kuzuzangpo"}:
             continue
-        return txt
+        return _compact_topic(txt) or txt
     return ""
 
 def last_user_message(history: List[Dict[str, str]]) -> str:
@@ -332,10 +348,40 @@ _FOLLOWUP_FRAGMENT_WORDS = {
     "types", "type", "options", "option", "process", "procedure",
     "how", "what about", "and this", "for this", "for that",
 }
+_FOLLOWUP_DETAIL_TERMS = {
+    "document", "documents", "requirement", "requirements", "required",
+    "eligibility", "eligible", "benefit", "benefits", "coverage",
+    "premium", "premiums", "rate", "rates", "interest", "tenure",
+    "repayment", "repayments", "process", "procedure", "steps",
+    "apply", "application", "claim", "claims", "contact", "contacts",
+    "branch", "branches", "address", "location",
+}
+_FOLLOWUP_DETAIL_PHRASES = {
+    "what about",
+    "how about",
+    "what are the documents",
+    "what documents",
+    "documents required",
+    "required documents",
+    "what are the requirements",
+    "what is the process",
+    "how to apply",
+    "how do i apply",
+    "what is the eligibility",
+    "interest rate",
+    "repayment period",
+}
 _BIL_CONTEXT_TERMS = {
     "bil", "insurance", "loan", "claim", "form", "forms", "policy", "premium",
     "motor", "fire", "travel", "engineering", "aviation", "marine", "liability",
     "ppf", "gf", "gfm", "provident", "gratuity", "download", "document",
+}
+_BIL_TOPIC_TERMS = {
+    "bil", "insurance", "loan", "loans", "claim", "claims", "policy", "policies",
+    "motor", "fire", "travel", "engineering", "aviation", "marine", "liability",
+    "ppf", "gf", "gfm", "provident", "gratuity", "housing", "vehicle", "personal",
+    "contractor", "tourism", "hotel", "agriculture", "livestock", "shares", "securities",
+    "branch", "branches", "contact", "contacts",
 }
 
 
@@ -345,10 +391,43 @@ def is_contextual_followup_fragment(q: str) -> bool:
         return False
     if qn in _FOLLOWUP_FRAGMENT_WORDS:
         return True
+    if any(phrase in qn for phrase in _FOLLOWUP_DETAIL_PHRASES):
+        return True
     words = qn.split()
-    if len(words) <= 5 and any(w in {"this", "that", "it", "these", "those"} for w in words):
+    if len(words) <= 8 and any(w in {"this", "that", "it", "these", "those", "they", "them"} for w in words):
         return True
     if len(words) <= 3 and any(w in {"more", "details", "types", "options"} for w in words):
+        return True
+    if len(words) <= 8 and any(w in _FOLLOWUP_DETAIL_TERMS for w in words) and not any(w in _BIL_TOPIC_TERMS for w in words):
+        return True
+    return False
+
+
+def has_explicit_bil_topic(q: str) -> bool:
+    qn = _norm(q)
+    if not qn:
+        return False
+    words = set(qn.split())
+    return bool(words & _BIL_TOPIC_TERMS)
+
+
+def should_bind_to_recent_topic(q: str, history: List[Dict[str, str]]) -> bool:
+    if not has_recent_bil_context(history):
+        return False
+    if is_contextual_followup_fragment(q):
+        return True
+
+    qn = _norm(q)
+    if not qn or has_explicit_bil_topic(q):
+        return False
+
+    words = qn.split()
+    if len(words) > 8:
+        return False
+
+    if any(phrase in qn for phrase in _FOLLOWUP_DETAIL_PHRASES):
+        return True
+    if any(w in _FOLLOWUP_DETAIL_TERMS for w in words):
         return True
     return False
 
@@ -367,6 +446,7 @@ def has_recent_bil_context(history: List[Dict[str, str]], window: int = 6) -> bo
 def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
     qn = _norm(q)
     expanded = [qn]
+    topic = _norm(last_user_topic(history))
 
     # Expand short fund-related asks so vector search has enough signal.
     if qn in {"pf", "ppf", "gf", "gfm", "provident", "gratuity", "fund", "funds"}:
@@ -380,7 +460,6 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
 
     # Follow-ups like "how to fill this form", "for 2022", "details"
     if any(p in qn for p in ["this form", "that form", "fill this form", "fill the form", "details", "for 20"]):
-        topic = _norm(last_user_topic(history))
         if topic:
             expanded.append(f"{qn} {topic}")
             expanded.append(topic)
@@ -391,20 +470,19 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
 
     # Use recent user context for very short follow-ups.
     if len(qn.split()) <= 2:
-        topic = _norm(last_user_topic(history))
         if topic and topic != qn:
             expanded.append(f"{qn} {topic}")
 
-    # Generic continuation handling: follow-up fragments should inherit the prior topic.
-    if is_contextual_followup_fragment(q):
-        topic = _norm(last_user_topic(history))
+    # Follow-up questions should inherit the prior topic.
+    if should_bind_to_recent_topic(q, history):
         if topic and topic != qn:
             expanded.append(f"{topic} {qn}")
+            expanded.append(f"{qn} {topic}")
             expanded.append(topic)
 
     # If recent context is BIL and query is short, bias retrieval toward BIL semantics
     # even without explicit keywords.
-    if has_recent_bil_context(history) and is_contextual_followup_fragment(q) and "bil" not in qn:
+    if should_bind_to_recent_topic(q, history) and "bil" not in qn:
         expanded.append(f"{qn} bhutan insurance limited")
 
     seen = set()
@@ -456,6 +534,9 @@ def should_promote_unrelated_to_bil(
         "tell", "about", "what", "which", "where", "when", "why", "how",
         "for", "the", "and", "with", "this", "that", "these", "those",
         "more", "detail", "details", "please", "need", "want",
+        "document", "documents", "requirement", "requirements", "required",
+        "process", "procedure", "steps", "rate", "rates", "interest",
+        "tenure", "premium", "coverage", "benefits", "eligibility",
     }
     raw_tokens = [
         t for t in re.findall(r"[a-z0-9]+", _norm(q))
@@ -480,12 +561,12 @@ def should_promote_unrelated_to_bil(
     raw_chunks = _probe(q)
     raw_best = _best_score(raw_chunks)
     raw_hits = _lexical_hits(raw_chunks, raw_tokens)
-    if raw_best >= max(settings.min_relevance, 0.24) and (not raw_tokens or raw_hits >= 1):
+    if has_explicit_bil_topic(q) and raw_tokens and raw_best >= max(settings.min_relevance, 0.24) and raw_hits >= 1:
         return True, raw_chunks
 
-    # Only run context-expanded rescue for explicit continuation fragments.
+    # Only run context-expanded rescue for genuine follow-up questions.
     q_words = _norm(q).split()
-    can_use_context_rescue = is_contextual_followup_fragment(q)
+    can_use_context_rescue = should_bind_to_recent_topic(q, history)
     if not can_use_context_rescue:
         return False, []
 
@@ -498,7 +579,7 @@ def should_promote_unrelated_to_bil(
     min_strong = max(settings.min_relevance, 0.26)
     if has_recent_bil_context(history):
         min_strong -= 0.06
-    if is_contextual_followup_fragment(q):
+    if should_bind_to_recent_topic(q, history):
         min_strong -= 0.05
     if len(q_words) <= 3:
         min_strong -= 0.03
@@ -1230,9 +1311,9 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
     except Exception:
         hint = "bil_query"
 
-    # Smart continuation: short follow-up fragments in an ongoing BIL thread should
+    # Smart continuation: short detail follow-ups in an ongoing BIL thread should
     # stay in BIL mode even when explicit product keywords are missing.
-    if hint == "unrelated" and has_recent_bil_context(history) and is_contextual_followup_fragment(q):
+    if hint == "unrelated" and should_bind_to_recent_topic(q, history):
         hint = "bil_query"
 
     # Dynamic fallback: if hint says unrelated but retrieval confidence is strong,
@@ -1246,7 +1327,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
     # 2) Forms path (ONLY when this message explicitly asks to get a form)
     formish_now = looks_like_form_download_request(q) or is_vague_form_request(q) or hint == "form_request"
     if formish_now:
-        candidate_queries = build_form_query_variants(q, history)
+        candidate_queries = _derive_action_form_queries(q, history)
 
         merged: List[Dict[str, Any]] = []
         seen_urls = set()
@@ -1267,6 +1348,17 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
                 continue
 
         if merged:
+            is_claim = "claim" in _norm(q)
+            if not is_claim:
+                filtered = []
+                for item in merged:
+                    hay = f"{item.get('title', '')} {item.get('url', '')}".lower()
+                    if "claim" in hay or "intimation" in hay:
+                        continue
+                    filtered.append(item)
+                if filtered:
+                    merged = filtered
+
             return finalize({
                 "intent": "form_request",
                 "answer": "I found the requested form(s). You can download them below.",
@@ -1357,11 +1449,14 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             chunks = []
 
     if not chunks:
-        # Retry with prior topic for vague follow-ups
+        # Retry with prior topic for vague follow-ups.
         retry_topic = last_user_topic(history) or last_user_message(history)
         if retry_topic and _norm(retry_topic) != _norm(q):
+            retry_query = retry_topic
+            if should_bind_to_recent_topic(q, history):
+                retry_query = f"{retry_topic} {q}".strip()
             try:
-                ctx_json = bil_retrieve_context.run(retry_topic)
+                ctx_json = bil_retrieve_context.run(retry_query)
                 ctx_obj = json.loads(ctx_json)
                 chunks = ctx_obj.get("chunks", []) or []
             except Exception:

@@ -30,6 +30,7 @@ _FORM_STOPWORDS = {
     "bil", "bhutan", "insurance", "limited", "company", "ltd",
     "document", "documents", "doc", "file", "files",
     "the", "a", "an", "for", "of", "to", "me", "give", "send", "this", "that",
+    "tell", "about", "explain", "describe", "details", "information", "info",
 }
 
 def _tokenize(text: str) -> List[str]:
@@ -104,6 +105,7 @@ def _score_form(query: str, form: Dict[str, Any]) -> float:
     cat = form.get("category") or ""
 
     hay = f"{title} {url} {cat}"
+    hay_l = hay.lower()
     h_tokens = set(_tokenize(hay))
 
     overlap = len(q_tokens & h_tokens)
@@ -113,22 +115,46 @@ def _score_form(query: str, form: Dict[str, Any]) -> float:
     base = overlap / max(1, len(q_tokens))
 
     url_l = unquote((url or "").lower())
+    ql = (query or "").lower()
     bonus = 0.0
     for t in q_tokens:
         if t in url_l:
             bonus += 0.08
+    if "proposal" in ql and "proposal" in hay_l:
+        bonus += 0.18
+    if "application" in ql and "application" in hay_l:
+        bonus += 0.18
+    if "claim" in ql and ("claim" in hay_l or "intimation" in hay_l):
+        bonus += 0.18
+    if "form" in ql and "form" in hay_l:
+        bonus += 0.08
 
     return min(1.0, base + bonus)
 
 def _best_matches(query: str, forms: List[Dict[str, Any]], top_k: int = TOP_K) -> List[Dict[str, Any]]:
-    scored: List[tuple[float, Dict[str, Any]]] = []
+    ql = (query or "").lower()
+
+    def _specificity_rank(form: Dict[str, Any]) -> int:
+        hay = f"{form.get('title', '')} {form.get('url', '')}".lower()
+        rank = 0
+        if "proposal" in ql and "proposal" in hay:
+            rank += 3
+        if "application" in ql and "application" in hay:
+            rank += 3
+        if "claim" in ql and ("claim" in hay or "intimation" in hay):
+            rank += 3
+        if "form" in ql and "form" in hay:
+            rank += 1
+        return rank
+
+    scored: List[tuple[float, int, Dict[str, Any]]] = []
     for f in forms:
         s = _score_form(query, f)
         if s >= MIN_SCORE:
-            scored.append((s, f))
+            scored.append((s, _specificity_rank(f), f))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [f for _, f in scored[:top_k]]
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [f for _, _, f in scored[:top_k]]
 
 _vectorstore = None
 _forms = None
@@ -160,8 +186,6 @@ def bil_get_forms(query: str) -> str:
     Returns JSON string with matching forms and URLs (from forms.json only).
     """
     init_resources()
-    if not looks_like_form_download_request(query):
-        return json.dumps({"matches": [], "found": False}, ensure_ascii=False)
 
     with _resource_lock:
         forms = list(_forms or [])
@@ -331,7 +355,7 @@ def bil_retrieve_context(query: str) -> str:
         lexical_hits = sum(1 for t in q_tokens if t and t in hay)
         boosted = min(1.0, sim + (0.08 * min(3, lexical_hits)))
 
-        all_scored.append((d, boosted))
+        all_scored.append((d, boosted, lexical_hits))
         if boosted >= settings.min_relevance:
             strong.append({
                 "content": clean_text(d.page_content),
@@ -342,10 +366,13 @@ def bil_retrieve_context(query: str) -> str:
 
     strong.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
-    # If nothing meets threshold, fall back to top results
+    # If nothing clears the main threshold, keep only weak-but-relevant lexical matches.
     if not strong and all_scored:
         all_scored.sort(key=lambda x: x[1], reverse=True)
-        for d, sim in all_scored[: max(1, min(3, len(all_scored)))]:
+        fallback_threshold = max(0.14, settings.min_relevance - 0.04)
+        for d, sim, lexical_hits in all_scored[: max(1, min(3, len(all_scored)))]:
+            if lexical_hits < 1 or sim < fallback_threshold:
+                continue
             strong.append({
                 "content": clean_text(d.page_content),
                 "source": d.metadata.get("source", ""),

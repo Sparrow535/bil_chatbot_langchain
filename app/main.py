@@ -125,6 +125,25 @@ def chat(req: ChatRequest):
 
     sid = req.session_id or "anon"
     history = list(SESSION_HISTORY[sid])
+
+    if req.history:
+        client_history = [{"role": m.role, "content": m.content} for m in req.history[-8:]]
+        if not history:
+            history = client_history
+            SESSION_HISTORY[sid].extend(client_history)
+        else:
+            merged = list(history)
+            seen = {(str(m.get("role", "")), str(m.get("content", ""))) for m in merged}
+            for item in client_history:
+                key = (item["role"], item["content"])
+                if key in seen:
+                    continue
+                merged.append(item)
+                seen.add(key)
+            history = merged[-12:]
+            SESSION_HISTORY[sid].clear()
+            SESSION_HISTORY[sid].extend(history)
+
     result = run_agent(query=req.message, history=history)
 
     SESSION_HISTORY[sid].append({"role": "user", "content": req.message})
