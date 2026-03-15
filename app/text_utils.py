@@ -12,9 +12,17 @@ _DOWNLOAD_VERBS = [
   "download", "give", "send", "share", "provide", "get", "show", "need", "want",
 ]
 
+_FILE_REQUEST_TERMS = [
+  "download", "pdf", "file", "files", "link", "copy", "attachment", "attachments",
+]
+
+_FILE_SHARE_VERBS = [
+  "send", "share", "attach", "upload",
+]
+
 _DOC_NOUNS = [
   "report", "reports", "annual report", "handbook", "guide", "manual",
-  "document", "documents", "pdf", "file", "files", "publication", "publications",
+  "document", "documents", "pdf", "publication", "publications",
 ]
 
 
@@ -73,15 +81,20 @@ def looks_like_document_download_request(q: str) -> bool:
     if not q:
         return False
 
-    has_download_verb = any(v in q for v in _DOWNLOAD_VERBS)
     has_doc_noun = any(n in q for n in _DOC_NOUNS)
+    if not has_doc_noun:
+        return False
 
-    # Explicit download request for report/doc/handbook/etc.
-    if has_download_verb and has_doc_noun:
+    has_file_term = any(t in q for t in _FILE_REQUEST_TERMS)
+    has_share_verb = any(v in q for v in _FILE_SHARE_VERBS)
+
+    # Explicit file-oriented asks only. "give me the annual report" should stay a content request.
+    if has_file_term:
+        return True
+    if has_share_verb and has_doc_noun:
         return True
 
-    # Direct phrases
-    if re.search(r"\b(annual\s+report|report|handbook|guide|manual)\b.*\b(pdf|download)\b", q):
+    if re.search(r"\b(annual\s+report|report|handbook|guide|manual)\b.*\b(pdf|download|file|link|attachment)\b", q):
         return True
 
     return False

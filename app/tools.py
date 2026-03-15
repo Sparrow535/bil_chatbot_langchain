@@ -159,7 +159,122 @@ def _best_matches(query: str, forms: List[Dict[str, Any]], top_k: int = TOP_K) -
 _vectorstore = None
 _forms = None
 _docs = None
+_annual_reports = None
 _resource_lock = threading.RLock()
+
+_FINANCIAL_QUERY_TERMS = {
+    "annual report", "annual report summary", "report highlights", "financial highlights",
+    "annual income", "income", "revenue", "profit", "earnings", "gross premium",
+    "premium written", "loan assets", "total assets", "shareholders equity",
+    "shareholders' equity", "equity", "npl", "profit after tax", "profit before tax",
+    "operating profit", "earnings per share", "eps",
+}
+_FINANCIAL_METRIC_ALIASES = {
+    "profit_after_tax": ["annual income", "net income", "annual earnings", "earnings after tax", "profit after tax", "profit"],
+    "profit_before_tax": ["profit before tax", "pre tax profit", "pretax profit"],
+    "gross_premium": ["gross premium written", "gross premium", "gross written premium", "premium written"],
+    "loan_assets": ["loan assets", "loan asset"],
+    "total_assets": ["total assets", "overall assets", "assets"],
+    "shareholders_equity": ["shareholders equity", "shareholders' equity", "shareholder equity", "equity"],
+    "net_npl_ratio": ["net npl ratio", "npl ratio", "npl"],
+    "earnings_per_share": ["basic earnings per share", "earnings per share", "earning per share", "eps"],
+    "general_insurance_operating_profit": ["general insurance department operating profit", "general insurance operating profit", "insurance department operating profit", "general insurance profit"],
+    "financing_investment_operating_profit": ["financing and investment department operating profit", "financing and investment operating profit", "investment department operating profit", "investment operating profit", "financing operating profit"],
+}
+_FINANCIAL_METRIC_LABELS = {
+    "profit_after_tax": "profit after tax",
+    "profit_before_tax": "profit before tax",
+    "gross_premium": "gross premium written",
+    "loan_assets": "loan assets",
+    "total_assets": "total assets",
+    "shareholders_equity": "shareholders' equity",
+    "net_npl_ratio": "net NPL ratio",
+    "earnings_per_share": "earnings per share",
+    "general_insurance_operating_profit": "general insurance operating profit",
+    "financing_investment_operating_profit": "financing and investment operating profit",
+}
+_FINANCIAL_VALUE_FORMATS = {
+    "earnings_per_share": "Nu. {value} per share",
+    "general_insurance_operating_profit": "Nu. {value} million",
+    "financing_investment_operating_profit": "Nu. {value} million",
+}
+_METRICS_MILLION_FROM_CONTEXT = {
+    "profit_after_tax",
+    "profit_before_tax",
+    "gross_premium",
+    "total_assets",
+    "shareholders_equity",
+    "loan_assets",
+}
+_FINANCIAL_PATTERNS = {
+    "profit_after_tax": [
+        re.compile(r"business performance highlights.{0,700}?profit after tax(?: for the year)?\s*(?P<value>[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE | re.DOTALL),
+        re.compile(r"profit after tax(?: for the year)?(?: attributable to [^.]+?)?(?: of| was| to)?\s*Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+        re.compile(r"earnings after tax(?: attributable to [^.]+?)?(?: of| was| to)?\s*Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+        re.compile(r"profit attributable to ordinary shareholders\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)", re.IGNORECASE),
+    ],
+    "profit_before_tax": [
+        re.compile(r"financial profitability.{0,320}?profit before\s*t\s*ax\s*(?P<value>[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE | re.DOTALL),
+        re.compile(r"profit before\s*t\s*ax(?: of| was| to)?\s*Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+        re.compile(r"profit before\s*t\s*ax\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)", re.IGNORECASE),
+    ],
+    "gross_premium": [
+        re.compile(r"gross premium(?: written)?(?: of| was| to)?\s*Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+        re.compile(r"business performance highlights.{0,520}?gross (?:written )?premium(?:\s+of)?(?:\s*nu\.?)?\s*(?P<value>[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE | re.DOTALL),
+    ],
+    "loan_assets": [
+        re.compile(r"loan assets.{0,260}? to\s*Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE | re.DOTALL),
+        re.compile(r"loan assets(?: as on [^.]+?)?(?: has increased| increased| stood at| stands? at| were| was)?.{0,200}?\bNu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE | re.DOTALL),
+    ],
+    "total_assets": [
+        re.compile(r"business performance highlights.{0,320}?t\s*otal assets\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)", re.IGNORECASE | re.DOTALL),
+        re.compile(r"(?:overall assets of the company|t\s*otal assets(?: of the company)?).*? to\s*Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+        re.compile(r"(?:overall assets of the company|t\s*otal assets(?: of the company)?) [^.]*?Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+    ],
+    "shareholders_equity": [
+        re.compile(r"shareholders? equity.*? to\s*Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+        re.compile(r"shareholders? equity [^.]*?Nu\.?\s*(?P<value>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<unit>million|billion)?", re.IGNORECASE),
+    ],
+    "net_npl_ratio": [
+        re.compile(r"net npl ratio [^.]*?(?P<value>[0-9]+(?:\.[0-9]+)?)\s*(?P<unit>%)", re.IGNORECASE),
+    ],
+    "earnings_per_share": [
+        re.compile(r"(?:basic\s+)?earnings?\s+per\s+share\s*\(?(?:nu\.?)?\)?\s*(?:\d+\s+)?(?P<value>[0-9]+\.[0-9]+)", re.IGNORECASE),
+        re.compile(r"(?:basic\s+)?earning\s+per\s+share\s*(?:\d+\s+)?(?P<value>[0-9]+\.[0-9]+)", re.IGNORECASE),
+    ],
+    "general_insurance_operating_profit": [
+        re.compile(r"business performance highlights.{0,560}?operating profit(?: insurance| general insurance) department\s*\(?(?P<value>-?[0-9]+(?:\.[0-9]+)?)\)?", re.IGNORECASE | re.DOTALL),
+        re.compile(r"general insurance department\s*\(revenue a/c\)\s*\(?(?P<value>-?[0-9][0-9,]*(?:\.[0-9]+)?)\)?", re.IGNORECASE),
+    ],
+    "financing_investment_operating_profit": [
+        re.compile(r"business performance highlights.{0,640}?investment department\s*\(?(?P<value>-?[0-9]+(?:\.[0-9]+)?)\)?", re.IGNORECASE | re.DOTALL),
+        re.compile(r"business performance highlights.{0,640}?operating profit(?: investment| financing(?:\s+and|\s*&)?\s*investment) department\s*\(?(?P<value>-?[0-9]+(?:\.[0-9]+)?)\)?", re.IGNORECASE | re.DOTALL),
+        re.compile(r"financing\s*(?:&|and)\s*investment department\s*\(revenue a/c\)\s*\(?(?P<value>-?[0-9][0-9,]*(?:\.[0-9]+)?)\)?", re.IGNORECASE),
+    ],
+}
+_FINANCIAL_HIGHLIGHT_ORDER = [
+    "profit_after_tax",
+    "profit_before_tax",
+    "gross_premium",
+    "earnings_per_share",
+    "loan_assets",
+    "total_assets",
+    "shareholders_equity",
+    "net_npl_ratio",
+    "general_insurance_operating_profit",
+    "financing_investment_operating_profit",
+]
+_FINANCIAL_SECTION_ORDER = [
+    ("At a glance", ["profit_after_tax", "profit_before_tax", "gross_premium", "earnings_per_share"]),
+    ("Balance sheet and portfolio", ["loan_assets", "total_assets", "shareholders_equity", "net_npl_ratio"]),
+    ("Business segments", ["general_insurance_operating_profit", "financing_investment_operating_profit"]),
+]
+_FINANCIAL_SUMMARY_LEAD_ORDER = [
+    "profit_after_tax",
+    "gross_premium",
+    "total_assets",
+    "loan_assets",
+]
 
 def init_resources():
     global _forms, _docs, _vectorstore
@@ -173,11 +288,12 @@ def init_resources():
 
 def refresh_vectorstore() -> None:
     """Reload vectorstore + forms safely after incremental indexing."""
-    global _vectorstore, _forms, _docs
+    global _vectorstore, _forms, _docs, _annual_reports
     with _resource_lock:
         _vectorstore = load_vectorstore()
         _forms = _load_forms()
         _docs = _load_documents()
+        _annual_reports = None
 
 @tool
 def bil_get_forms(query: str) -> str:
@@ -381,6 +497,391 @@ def bil_retrieve_context(query: str) -> str:
             })
 
     return json.dumps({"chunks": strong, "found": bool(strong)}, ensure_ascii=False)
+
+
+def _load_annual_reports() -> Dict[str, Dict[str, Any]]:
+    global _annual_reports
+    with _resource_lock:
+        if _annual_reports is not None:
+            return _annual_reports
+
+        reports: Dict[str, Dict[str, Any]] = {}
+        if RAW_PATH.exists():
+            with RAW_PATH.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if (obj.get("type") or "").strip().lower() != "document":
+                        continue
+                    title = (obj.get("title") or "").strip()
+                    source = (obj.get("source") or "").strip()
+                    blob = f"{title} {source}".lower()
+                    if "annual report" not in blob and "annual-report" not in blob:
+                        continue
+                    m = re.search(r"(?:annual report|annual-report)[^0-9]*(20\d{2})", blob)
+                    if not m:
+                        m = re.search(r"(20\d{2})[^0-9]*(?:annual report|annual-report)", blob)
+                    if not m:
+                        continue
+                    year = m.group(1)
+                    reports[year] = {
+                        "title": title,
+                        "source": source,
+                        "text": clean_text(obj.get("text") or ""),
+                    }
+        _annual_reports = reports
+        return _annual_reports
+
+
+def _looks_like_annual_report_summary_query(query: str) -> bool:
+    ql = (query or "").lower()
+    if not re.search(r"\b20\d{2}\b", ql):
+        return False
+    if "annual report" in ql:
+        return True
+    summary_cues = {"report", "summary", "highlights", "overview", "tell me about", "about the report"}
+    return any(cue in ql for cue in summary_cues) and "report" in ql
+
+
+def _looks_like_financial_fact_query(query: str) -> bool:
+    ql = (query or "").lower()
+    if not re.search(r"\b20\d{2}\b", ql):
+        return False
+    return _looks_like_annual_report_summary_query(query) or any(term in ql for term in _FINANCIAL_QUERY_TERMS)
+
+
+def _normalize_financial_phrase(text: str) -> str:
+    normalized = (text or "").lower().replace("&", " and ")
+    normalized = normalized.replace("'", " ")
+    normalized = re.sub(r"[^a-z0-9.%]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _resolve_financial_metric(query: str) -> str:
+    ql = _normalize_financial_phrase(query)
+    if not ql:
+        return ""
+
+    qn = f" {ql} "
+    best_metric = ""
+    best_len = 0
+    for metric, aliases in _FINANCIAL_METRIC_ALIASES.items():
+        for alias in aliases:
+            alias_n = _normalize_financial_phrase(alias)
+            if not alias_n:
+                continue
+            if f" {alias_n} " not in qn:
+                continue
+            if len(alias_n) > best_len:
+                best_metric = metric
+                best_len = len(alias_n)
+    return best_metric
+
+
+def _wants_annual_report_summary(query: str, metric: str) -> bool:
+    ql = (query or "").lower()
+    if _looks_like_annual_report_summary_query(query) and not metric:
+        return True
+    if not metric and any(cue in ql for cue in ["highlights", "summary", "overview"]):
+        return True
+    return False
+
+
+def _extract_financial_sentence(text: str, start: int, end: int) -> str:
+    left = max(text.rfind(". ", 0, start), text.rfind("; ", 0, start), text.rfind(": ", 0, start))
+    if left < 0:
+        left = max(text.rfind(".", 0, start), text.rfind(";", 0, start), text.rfind(":", 0, start))
+    right_candidates = [idx for idx in [text.find(". ", end), text.find("; ", end)] if idx != -1]
+    if right_candidates:
+        right = min(right_candidates) + 1
+    else:
+        right = text.find(".", end)
+        if right == -1:
+            right = min(len(text), end + 220)
+    return clean_text(text[left + 1:right + 1])
+
+
+def _format_financial_value(metric: str, match: re.Match[str], text: str) -> str:
+    value = (match.group("value") or "").strip()
+    unit = (match.groupdict().get("unit") or "").strip()
+    matched_text = match.group(0) or ""
+    if value and not value.startswith("-") and re.search(rf"\(\s*{re.escape(value)}\s*\)", matched_text):
+        value = f"-{value}"
+    if unit == "%":
+        return f"{value}%"
+    if unit:
+        return f"Nu. {value} {unit}"
+    local_window = text[max(0, match.start() - 220): min(len(text), match.end() + 220)].lower()
+    if (
+        metric in _METRICS_MILLION_FROM_CONTEXT
+        and re.fullmatch(r"-?[0-9][0-9,]*(?:\.[0-9]+)?", value)
+        and "." in value
+        and "figures in million" in local_window
+    ):
+        return f"Nu. {value} million"
+    if metric in _FINANCIAL_VALUE_FORMATS:
+        return _FINANCIAL_VALUE_FORMATS[metric].format(value=value)
+    return f"Nu. {value}"
+
+
+def _is_financial_metric_match_valid(metric: str, sentence: str) -> bool:
+    sentence_l = (sentence or "").lower()
+    if metric == "loan_assets":
+        blocked = {"pending forclosure", "transferred", "npl", "non-performing"}
+        if any(term in sentence_l for term in blocked):
+            return False
+    return True
+
+
+def _extract_financial_metric(text: str, metric: str) -> Dict[str, str] | None:
+    for pat in _FINANCIAL_PATTERNS.get(metric, []):
+        m = pat.search(text)
+        if not m:
+            continue
+        sentence = _extract_financial_sentence(text, m.start(), m.end())
+        if not _is_financial_metric_match_valid(metric, sentence):
+            continue
+        return {
+            "metric": metric,
+            "label": _FINANCIAL_METRIC_LABELS[metric],
+            "value": _format_financial_value(metric, m, text),
+            "sentence": sentence,
+        }
+    return None
+
+
+def _render_financial_primary(year: str, item: Dict[str, str]) -> str:
+    if item.get("metric") == "net_npl_ratio":
+        return f"In {year}, BIL's {item['label']} was {item['value']}."
+    return f"In {year}, BIL reported {item['label']} of {item['value']}."
+
+
+def _display_metric_label(label: str) -> str:
+    if (label or "").lower() == "net npl ratio":
+        return "Net NPL ratio"
+    cleaned = (label or "").strip()
+    if not cleaned:
+        return ""
+    return cleaned[:1].upper() + cleaned[1:]
+
+
+def _group_financial_highlights(
+    highlights: List[Dict[str, str]],
+    exclude_metrics: set[str] | None = None,
+    max_items: int | None = None,
+) -> List[Tuple[str, List[Dict[str, str]]]]:
+    highlight_map = {
+        item.get("metric", ""): item
+        for item in highlights
+        if item.get("metric")
+    }
+    excluded = set(exclude_metrics or set())
+    grouped: List[Tuple[str, List[Dict[str, str]]]] = []
+    count = 0
+
+    for section_title, metric_keys in _FINANCIAL_SECTION_ORDER:
+        items: List[Dict[str, str]] = []
+        for key in metric_keys:
+            if key in excluded or key not in highlight_map:
+                continue
+            items.append(highlight_map[key])
+            count += 1
+            if max_items is not None and count >= max_items:
+                break
+        if items:
+            grouped.append((section_title, items))
+        if max_items is not None and count >= max_items:
+            break
+
+    return grouped
+
+
+def _render_highlight_sections_md(
+    sections: List[Tuple[str, List[Dict[str, str]]]],
+    heading: str,
+) -> str:
+    if not sections:
+        return ""
+
+    lines = [f"**{heading}**"]
+    for section_title, items in sections:
+        lines.append(f"\n**{section_title}**")
+        for item in items:
+            lines.append(f"- {_display_metric_label(item['label'])}: {item['value']}")
+    return "\n".join(lines)
+
+
+def _render_missing_annual_report(year: str, available_years: List[str]) -> tuple[str, str]:
+    ordered = sorted(available_years)
+    if ordered:
+        earliest = ordered[0]
+        latest = ordered[-1]
+        if year < earliest:
+            answer = f"I couldn't find a BIL annual report for {year} in the indexed documents. The earliest report I have is {earliest}."
+        elif year > latest:
+            answer = f"I don't have the {year} annual report in the indexed documents yet. The latest report I have is {latest}."
+        else:
+            answer = f"I found references to the {year} annual report, but I couldn't extract a reliable summary from the indexed copy."
+    else:
+        answer = f"I couldn't find a BIL annual report for {year} in the indexed documents."
+
+    answer_md = f"**BIL {year} Annual Report**\n\n{answer}"
+    return answer, answer_md
+
+
+def _render_annual_report_summary(year: str, highlights: List[Dict[str, str]]) -> tuple[str, str]:
+    if not highlights:
+        return "", ""
+
+    highlight_map = {item["metric"]: item for item in highlights if item.get("metric")}
+    lead = [highlight_map[key] for key in _FINANCIAL_SUMMARY_LEAD_ORDER if key in highlight_map][:3]
+    if not lead:
+        lead = highlights[:3]
+    fragments = [f"{item['label']} of {item['value']}" for item in lead]
+
+    if len(highlights) <= 2:
+        answer = f"I found the {year} annual report, but I could only extract a limited summary from the current indexed copy: {fragments[0]}."
+        intro = f"I found the {year} report, but the extracted text for this year is limited. Here are the figures I could read reliably."
+    elif len(fragments) == 1:
+        answer = f"For {year}, BIL's annual report highlights {fragments[0]}."
+        intro = f"Here is the main picture from the {year} annual report."
+    elif len(fragments) == 2:
+        answer = f"For {year}, BIL's annual report highlights {fragments[0]} and {fragments[1]}."
+        intro = f"Here is the main picture from the {year} annual report."
+    else:
+        answer = f"For {year}, BIL's annual report highlights " + ", ".join(fragments[:-1]) + f", and {fragments[-1]}."
+        intro = f"Here is the main picture from the {year} annual report."
+
+    sections = _group_financial_highlights(highlights, max_items=10)
+    answer_md = (
+        f"**BIL {year} Annual Report**\n\n"
+        f"{intro}\n\n"
+        f"{_render_highlight_sections_md(sections, 'Key figures')}"
+    ).strip()
+
+    return answer, answer_md
+
+@tool
+def bil_extract_financial_fact(query: str) -> str:
+    """
+    Use for year-specific BIL annual-report and financial-result questions.
+    Returns JSON with either a direct metric answer or a compact annual-report summary.
+    """
+    if not _looks_like_financial_fact_query(query):
+        return json.dumps({"found": False}, ensure_ascii=False)
+
+    years = re.findall(r"\b(20\d{2})\b", query or "")
+    if not years:
+        return json.dumps({"found": False}, ensure_ascii=False)
+    year = years[0]
+
+    reports = _load_annual_reports()
+    report = reports.get(year)
+    if not report or not report.get("text"):
+        if _looks_like_annual_report_summary_query(query):
+            answer, answer_md = _render_missing_annual_report(year, list(reports.keys()))
+            return json.dumps(
+                {
+                    "found": True,
+                    "year": year,
+                    "mode": "missing_report",
+                    "metric": "",
+                    "answer": answer,
+                    "answer_md": answer_md,
+                    "highlights": [],
+                    "source": "",
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps({"found": False, "year": year}, ensure_ascii=False)
+
+    report_text = report["text"]
+    extracted: Dict[str, Dict[str, str]] = {}
+    for metric in _FINANCIAL_HIGHLIGHT_ORDER:
+        item = _extract_financial_metric(report_text, metric)
+        if item:
+            extracted[metric] = item
+
+    if not extracted:
+        if _looks_like_annual_report_summary_query(query):
+            answer, answer_md = _render_missing_annual_report(year, list(reports.keys()))
+            return json.dumps(
+                {
+                    "found": True,
+                    "year": year,
+                    "mode": "missing_report",
+                    "metric": "",
+                    "answer": answer,
+                    "answer_md": answer_md,
+                    "highlights": [],
+                    "source": report.get("title", ""),
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps({"found": False, "year": year}, ensure_ascii=False)
+
+    metric = _resolve_financial_metric(query)
+    wants_summary = _wants_annual_report_summary(query, metric)
+
+    if wants_summary:
+        summary_items = [extracted[key] for key in _FINANCIAL_HIGHLIGHT_ORDER if key in extracted]
+        answer, answer_md = _render_annual_report_summary(year, summary_items)
+        return json.dumps(
+            {
+                "found": True,
+                "year": year,
+                "mode": "summary",
+                "metric": "",
+                "answer": answer,
+                "answer_md": answer_md,
+                "highlights": summary_items[:10],
+                "source": report.get("title", ""),
+            },
+            ensure_ascii=False,
+        )
+
+    primary = extracted.get(metric)
+    if primary is None:
+        primary = extracted.get("profit_after_tax") or extracted.get("gross_premium") or next(iter(extracted.values()))
+
+    extra_items = []
+    for key in _FINANCIAL_HIGHLIGHT_ORDER:
+        if key == primary.get("metric") or key not in extracted:
+            continue
+        extra_items.append(extracted[key])
+        if len(extra_items) >= 6:
+            break
+
+    answer = _render_financial_primary(year, primary)
+    answer_md = f"**BIL {year}**\n\n{answer}"
+    sections = _group_financial_highlights(
+        [extracted[key] for key in _FINANCIAL_HIGHLIGHT_ORDER if key in extracted],
+        exclude_metrics={primary.get("metric", "")},
+        max_items=6,
+    )
+    sections_md = _render_highlight_sections_md(sections, "Other figures from the same report")
+    if sections_md:
+        answer_md += f"\n\n{sections_md}"
+    return json.dumps(
+        {
+            "found": True,
+            "year": year,
+            "mode": "metric",
+            "metric": primary.get("metric", ""),
+            "answer": answer,
+            "answer_md": answer_md,
+            "highlights": extra_items,
+            "source": report.get("title", ""),
+        },
+        ensure_ascii=False,
+    )
+
+
 
 @tool
 def bil_unrelated_reply(user_query: str) -> str:

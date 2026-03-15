@@ -97,6 +97,26 @@
     GLOBAL_CONFIG.fabCloseIcon ||
     (ASSET_BASE ? `${ASSET_BASE}/assets/down.svg` : "./assets/down.svg");
   let teaserTimer = null;
+  let isAssistantBusy = false;
+
+  function syncComposerControls() {
+    const isHinting = Boolean(composerNormal && composerNormal.classList.contains("hinting"));
+    const isTranscribing = Boolean(composerNormal && composerNormal.classList.contains("transcribing"));
+
+    if (sendBtn) {
+      sendBtn.disabled = isAssistantBusy || isHinting;
+      sendBtn.setAttribute("aria-hidden", isTranscribing ? "true" : "false");
+    }
+
+    if (micBtn) {
+      micBtn.disabled = isAssistantBusy && !isHinting;
+    }
+  }
+
+  function setAssistantBusy(next) {
+    isAssistantBusy = Boolean(next);
+    syncComposerControls();
+  }
 
   function scheduleTeaser() {
     if (!teaser) return;
@@ -152,7 +172,10 @@
       );
 
     if (!text) {
-      if (composerNormal) composerNormal.classList.remove("hinting");
+      if (composerNormal) {
+        composerNormal.classList.remove("hinting");
+        composerNormal.classList.remove("transcribing");
+      }
       if (inputEl) {
         inputEl.disabled = false;
         inputEl.style.display = "";
@@ -166,12 +189,15 @@
         micBtn.innerHTML = micDefaultHtml;
         micBtn.classList.remove("hint-cancel");
       }
-      if (sendBtn) sendBtn.disabled = false;
+      syncComposerControls();
       return;
     }
 
     if (isCancelled) {
-      if (composerNormal) composerNormal.classList.remove("hinting");
+      if (composerNormal) {
+        composerNormal.classList.remove("hinting");
+        composerNormal.classList.remove("transcribing");
+      }
       if (inputEl) {
         inputEl.disabled = false;
         inputEl.style.display = "";
@@ -185,11 +211,14 @@
         micBtn.innerHTML = micDefaultHtml;
         micBtn.classList.remove("hint-cancel");
       }
-      if (sendBtn) sendBtn.disabled = false;
+      syncComposerControls();
       return;
     }
 
-    if (composerNormal) composerNormal.classList.add("hinting");
+    if (composerNormal) {
+      composerNormal.classList.add("hinting");
+      composerNormal.classList.toggle("transcribing", isTranscribing);
+    }
     if (inputEl) {
       inputEl.disabled = true;
       inputEl.style.display = "none";
@@ -215,7 +244,7 @@
       micBtn.innerHTML = "✕";
       micBtn.classList.add("hint-cancel");
     }
-    if (sendBtn) sendBtn.disabled = true;
+    syncComposerControls();
   }
 
   function getGreeting() {
@@ -599,18 +628,27 @@
   // =====================
   // Chat send
   // =====================
-  async function sendMessage() {
-    const text = inputEl.value.trim();
+  async function sendMessage(messageOverride = "") {
+    if (isAssistantBusy || sttInFlight) return;
+
+    const text = String(messageOverride || inputEl.value || "").trim();
     if (!text) return;
 
+    if (composerNormal && composerNormal.classList.contains("hinting")) {
+      showHint("");
+    }
+
+    setAssistantBusy(true);
     addTextMessage(text, "outgoing");
     history.push({ role: "user", content: text });
 
-    inputEl.value = "";
+    if (!messageOverride) {
+      inputEl.value = "";
+    }
 
     // typing indicator
     const fileish = isFileRequest(text);
-    const { row: typingRow, bubble: typingBubble } = addTypingBubble();
+    const { row: typingRow } = addTypingBubble();
     const typingStart = Date.now();
     const minTypingMs = fileish ? 1500 : 1500;
     try {
@@ -625,10 +663,8 @@
         await new Promise((r) => setTimeout(r, targetDelay - elapsed));
       }
 
-      // remove typing bubble
-      typingRow.remove();
+      if (typingRow.isConnected) typingRow.remove();
 
-      // pick markdown if available
       const md =
         data && typeof data.answer_md === "string" && data.answer_md.trim()
           ? data.answer_md
@@ -636,26 +672,25 @@
             ? String(data.answer)
             : "Sorry, I couldn't process that.";
 
-      // create bot bubble and progressive render
       const { bubble } = addMessageRow("incoming");
       await typeMarkdown(bubble, md);
 
-      // store plain answer in history (not HTML)
       const plainAnswer =
         data && data.answer ? String(data.answer) : stripMarkdown(md);
       history.push({ role: "assistant", content: plainAnswer });
 
-      // downloads
       if (data && Array.isArray(data.downloads) && data.downloads.length > 0) {
         addDownloadsUI(data.downloads);
       }
     } catch (err) {
-      typingRow.remove();
+      if (typingRow.isConnected) typingRow.remove();
       addTextMessage(
         "Sorry, I’m having trouble connecting right now. Please try again.",
         "incoming",
       );
       console.error(err);
+    } finally {
+      setAssistantBusy(false);
     }
   }
 
@@ -989,10 +1024,11 @@
             return;
           }
 
-          inputEl.value = text;
           if (autoSendAfterTranscribe) {
             await new Promise((r) => setTimeout(r, 80));
-            sendMessage();
+            await sendMessage(text);
+          } else {
+            inputEl.value = text;
           }
         } catch (e) {
           sttInFlight = null;
@@ -1053,6 +1089,7 @@
   }
 
   function finishMicPress(pointerId) {
+    if (isAssistantBusy) return;
     if (!micPressActive) return;
     if (
       micPressPointerId !== null &&
@@ -1081,7 +1118,7 @@
   }
 
   function startMicPress(pointerId = null) {
-    if (isRecording || sttInFlight || micPressActive) return;
+    if (isAssistantBusy || isRecording || sttInFlight || micPressActive) return;
 
     micPressActive = true;
     micPressPointerId = typeof pointerId === "number" ? pointerId : null;
@@ -1127,6 +1164,7 @@
 
   // Keyboard accessibility for the mic button.
   micBtn.addEventListener("keydown", (e) => {
+    if (isAssistantBusy) return;
     if (e.key !== "Enter" && e.key !== " ") return;
     e.preventDefault();
     if (composerNormal && composerNormal.classList.contains("hinting")) {
@@ -1135,6 +1173,8 @@
     }
     if (!isRecording && !sttInFlight) beginRecording({ holdToTalk: false });
   });
+
+  syncComposerControls();
 
   recCancelBtn.addEventListener("click", () => endRecording(true));
   recSendBtn.addEventListener("click", () => {

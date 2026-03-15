@@ -16,6 +16,7 @@ from app.text_utils import (
     looks_like_document_download_request,
 )
 from app.tools import (
+    bil_extract_financial_fact,
     bil_get_forms,
     bil_get_documents,
     bil_retrieve_context,
@@ -70,6 +71,11 @@ _FOLLOWUP_STYLE_HINTS = [
     "Treat short follow-ups as continuation of prior context and answer directly without repeating generic intros.",
     "Keep follow-up responses concise but specific, with one short context reminder only if needed.",
 ]
+_OVERVIEW_STYLE_HINTS = [
+    "For broad or overview requests, start with a short plain-language overview, then list the main types or key points with one-line descriptions.",
+    "Do not jump into procedures, rates, forms, or document lists unless the user asked for them explicitly.",
+    "If the topic is a claim type or product, explain what it is and when it applies before mentioning next steps.",
+]
 _STYLE_TAGS = {
     "numbered": re.compile(r"(^|\n)\s*\d+\.\s", re.IGNORECASE),
     "key_points": re.compile(r"\bkey points\b", re.IGNORECASE),
@@ -87,19 +93,35 @@ def _detect_style_tags(text: str) -> set[str]:
     return found
 
 
+def _is_general_overview_request(query: str) -> bool:
+    qn = _norm(query)
+    if not qn or _is_actionable_query(query):
+        return False
+    overview_prefixes = (
+        "tell me about",
+        "tell me more about",
+        "more on",
+        "what about",
+        "explain",
+        "describe",
+        "information on",
+        "info on",
+    )
+    if any(qn.startswith(prefix) for prefix in overview_prefixes):
+        return True
+    if len(qn.split()) <= 4 and has_explicit_bil_topic(qn):
+        return True
+    return False
+
+
 def build_style_hint(query: str, history: List[Dict[str, str]]) -> str:
     qn = _norm(query)
     last_assistant = last_assistant_message(history)
     last_tags = _detect_style_tags(last_assistant)
 
-    pool: List[str] = list(_STYLE_HINTS)
-    if _is_actionable_query(query):
-        pool.extend(_PROCESS_STYLE_HINTS)
-    if len(qn.split()) <= 4 or is_affirmative_reply(query):
-        pool.extend(_FOLLOWUP_STYLE_HINTS)
-
-    filtered: List[str] = []
-    for hint in pool:
+    base_pool: List[str] = list(_STYLE_HINTS)
+    filtered_base: List[str] = []
+    for hint in base_pool:
         h = hint.lower()
         if "numbered" in h and "numbered" in last_tags:
             continue
@@ -109,10 +131,21 @@ def build_style_hint(query: str, history: List[Dict[str, str]]) -> str:
             continue
         if "overview" in h and "overview" in last_tags:
             continue
-        filtered.append(hint)
+        filtered_base.append(hint)
+    base_choice = random.choice(filtered_base or base_pool)
 
-    candidates = filtered or pool
-    return random.choice(candidates)
+    extras: List[str] = []
+    if _is_general_overview_request(query):
+        extras.extend(_OVERVIEW_STYLE_HINTS)
+    elif _is_actionable_query(query):
+        extras.append(random.choice(_PROCESS_STYLE_HINTS))
+
+    if len(qn.split()) <= 4 or is_affirmative_reply(query):
+        extras.append(random.choice(_FOLLOWUP_STYLE_HINTS))
+
+    if extras:
+        return " ".join(extras + [base_choice])
+    return base_choice
 
 # =========================
 # Social intents
@@ -122,11 +155,21 @@ _FAREWELLS = {"bye", "goodbye", "see you", "see ya", "take care", "later", "okay
 _THANKS = {"thanks", "thank you", "thx", "thanks a lot", "appreciate it"}
 _TOPIC_PREFIX_RE = re.compile(
     r"^(tell me about|tell me more about|tell me|explain|describe|what is|what are|"
+    r"more on|what about|can you tell me about|can you explain|"
+    r"give me|can you give me|show me|send me|share|provide|download|download the|open|open the|"
     r"give me info on|give me information on|information on|info on|details on|"
     r"i want to know about|i need to know about|i need info on|i want info on|"
-    r"how to apply for|how do i apply for|how to claim for|how do i claim for)\s+",
+    r"how to apply for|how do i apply for|how to claim for|how do i claim for|"
+    r"how to apply|how do i apply|how to claim|how do i claim|how to file|how do i file|"
+    r"how to submit|how do i submit|documents required for|required documents for|requirements for)\s+",
     re.IGNORECASE,
 )
+_TOPIC_PRONOUNS = {"it", "this", "that", "them", "these", "those", "one"}
+_GENERIC_TOPIC_FOLLOWUPS = {
+    "types", "type", "options", "details", "more", "more info", "some more",
+    "more details", "tell me more", "anything else", "next",
+}
+
 
 def _norm(s: str) -> str:
     s = (s or "").lower().strip()
@@ -134,13 +177,18 @@ def _norm(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def _compact_topic(text: str) -> str:
     qn = _norm(text)
     if not qn:
         return ""
     qn = _TOPIC_PREFIX_RE.sub("", qn)
     qn = re.sub(r"\b(please|kindly|now|today)\b", "", qn)
+    qn = re.sub(r"^the\s+", "", qn)
+    qn = re.sub(r"\b(pdf|file|files|document|documents|link|links)\b", "", qn)
     qn = re.sub(r"\s+", " ", qn).strip()
+    if not qn or qn in _TOPIC_PRONOUNS:
+        return ""
     return qn
 
 def normalize_query_aliases(text: str) -> str:
@@ -277,10 +325,58 @@ def extract_form_topic(q: str) -> str:
     topic = re.sub(r"\b(this|that|it)\b", "", topic).strip()
     return _compact_topic(topic)
 
+
+def _has_topic_signal(text: str) -> bool:
+    qn = _norm(text)
+    if not qn:
+        return False
+    return bool(_query_products(qn) or has_explicit_bil_topic(qn) or re.search(r"\b20\d{2}\b", qn))
+
+
+def _should_skip_user_topic(text: str) -> bool:
+    qn = normalize_query_aliases((text or "").strip())
+    if not qn:
+        return True
+
+    qn_norm = _norm(qn)
+    compact = _compact_topic(qn)
+    if not compact:
+        return True
+
+    if qn_norm in {"hi", "hello", "hey", "bye", "thanks", "thank you", "kuzuzangpo"}:
+        return True
+    if is_affirmative_reply(qn) or is_vague_form_request(qn):
+        return True
+    if extract_followup_year(qn_norm) or _is_generic_context_query(qn_norm):
+        return True
+    if compact in _GENERIC_TOPIC_FOLLOWUPS:
+        return True
+
+    form_topic = extract_form_topic(qn)
+    if form_topic or _has_topic_signal(qn_norm) or _has_topic_signal(compact):
+        return False
+
+    tokens = set(compact.split())
+    if tokens and tokens <= _TOPIC_PRONOUNS:
+        return True
+    if len(tokens) <= 4 and (tokens & _FOLLOWUP_DETAIL_TERMS):
+        return True
+    if len(tokens) <= 6 and (tokens & _TOPIC_PRONOUNS) and (tokens & _FOLLOWUP_DETAIL_TERMS):
+        return True
+    if re.search(r"\bwhat\s+does\s+(it|this|that|them|these|those)\b", qn_norm):
+        return True
+    if any(phrase in qn_norm for phrase in _FOLLOWUP_DETAIL_PHRASES):
+        return True
+    if _is_actionable_query(qn):
+        return True
+    return False
+
+
 def last_user_topic(history: List[Dict[str, str]]) -> str:
     """
-    Use last meaningful USER message.
-    Avoid assistant messages because they contain many doc keywords -> wrong forms.
+    Use the most recent USER turn that still carries topic signal.
+    Skip vague follow-ups like "how to file it", "give me the form", or "for 2020?"
+    so later continuity can stay anchored to the real product/report topic.
     """
     for m in reversed(history):
         if m.get("role") != "user":
@@ -288,19 +384,14 @@ def last_user_topic(history: List[Dict[str, str]]) -> str:
         txt = normalize_query_aliases((m.get("content") or "").strip())
         if not txt:
             continue
-        if is_affirmative_reply(txt):
-            continue
         form_topic = extract_form_topic(txt)
         if form_topic:
             return form_topic
-        if is_vague_form_request(txt):
+        if _should_skip_user_topic(txt):
             continue
-        if _norm(txt) in {"types", "type", "options", "details", "more", "more info"}:
-            continue
-        # ignore social chatter
-        if _norm(txt) in {"hi", "hello", "hey", "bye", "thanks", "thank you", "kuzuzangpo"}:
-            continue
-        return _compact_topic(txt) or txt
+        compact = _compact_topic(txt)
+        if compact:
+            return compact
     return ""
 
 def last_user_message(history: List[Dict[str, str]]) -> str:
@@ -320,6 +411,31 @@ def last_assistant_message(history: List[Dict[str, str]]) -> str:
         if txt:
             return txt
     return ""
+
+
+def last_assistant_topic(history: List[Dict[str, str]]) -> str:
+    for m in reversed(history):
+        if m.get("role") != "assistant":
+            continue
+        txt = normalize_query_aliases((m.get("content") or "").strip())
+        if not txt:
+            continue
+        topic = _extract_topic_from_history_text(txt)
+        if topic:
+            return topic
+    return ""
+
+
+def last_active_topic(history: List[Dict[str, str]]) -> str:
+    user_topic = last_user_topic(history)
+    if user_topic:
+        return user_topic
+
+    assistant_topic = last_assistant_topic(history)
+    if assistant_topic:
+        return assistant_topic
+
+    return last_user_message(history) or last_assistant_message(history)
 
 def build_recent_history_context(history: List[Dict[str, str]], max_items: int = 4) -> str:
     if not history:
@@ -351,10 +467,12 @@ _FOLLOWUP_FRAGMENT_WORDS = {
 _FOLLOWUP_DETAIL_TERMS = {
     "document", "documents", "requirement", "requirements", "required",
     "eligibility", "eligible", "benefit", "benefits", "coverage",
+    "cover", "covers", "covered", "exclusion", "exclusions",
     "premium", "premiums", "rate", "rates", "interest", "tenure",
     "repayment", "repayments", "process", "procedure", "steps",
     "apply", "application", "claim", "claims", "contact", "contacts",
-    "branch", "branches", "address", "location",
+    "branch", "branches", "address", "location", "income", "earnings",
+    "report", "reports", "financial",
 }
 _FOLLOWUP_DETAIL_PHRASES = {
     "what about",
@@ -370,25 +488,71 @@ _FOLLOWUP_DETAIL_PHRASES = {
     "what is the eligibility",
     "interest rate",
     "repayment period",
+    "same for",
 }
 _BIL_CONTEXT_TERMS = {
     "bil", "insurance", "loan", "claim", "form", "forms", "policy", "premium",
     "motor", "fire", "travel", "engineering", "aviation", "marine", "liability",
     "ppf", "gf", "gfm", "provident", "gratuity", "download", "document",
+    "annual", "report", "financial", "income", "earnings",
 }
 _BIL_TOPIC_TERMS = {
     "bil", "insurance", "loan", "loans", "claim", "claims", "policy", "policies",
     "motor", "fire", "travel", "engineering", "aviation", "marine", "liability",
     "ppf", "gf", "gfm", "provident", "gratuity", "housing", "vehicle", "personal",
     "contractor", "tourism", "hotel", "agriculture", "livestock", "shares", "securities",
-    "branch", "branches", "contact", "contacts",
+    "branch", "branches", "contact", "contacts", "annual", "report", "reports",
+    "financial", "income", "earnings",
 }
+_YEAR_FOLLOWUP_RE = re.compile(
+    r"^(?:for|in|about|what about|how about|same for|and for)?\s*(20\d{2})\??$",
+    re.IGNORECASE,
+)
+_GENERIC_CONTEXT_TERMS = {
+    "report", "reports", "annual", "document", "documents", "file", "files",
+    "it", "this", "that", "same", "one",
+}
+_CONTEXT_STOPWORDS = {
+    "can", "could", "would", "please", "tell", "me", "about", "the", "a", "an",
+    "give", "show", "share", "send", "provide", "need", "want", "for", "of", "to",
+}
+
+
+def extract_followup_year(q: str) -> str:
+    qn = _norm(q)
+    if not qn:
+        return ""
+    m = _YEAR_FOLLOWUP_RE.match(qn)
+    return m.group(1) if m else ""
+
+
+def _retarget_topic_year(topic: str, year: str) -> str:
+    topic_n = _compact_topic(topic)
+    if not topic_n or not year:
+        return topic_n
+    if re.search(r"\b20\d{2}\b", topic_n):
+        return re.sub(r"\b20\d{2}\b", year, topic_n)
+    return f"{topic_n} {year}".strip()
+
+
+def _is_generic_context_query(q: str) -> bool:
+    qn = _norm(q)
+    if not qn:
+        return False
+    words = [w for w in qn.split() if w not in _CONTEXT_STOPWORDS]
+    if not words:
+        return False
+    return all(w in _GENERIC_CONTEXT_TERMS for w in words)
 
 
 def is_contextual_followup_fragment(q: str) -> bool:
     qn = _norm(q)
     if not qn:
         return False
+    if extract_followup_year(qn):
+        return True
+    if _is_generic_context_query(qn):
+        return True
     if qn in _FOLLOWUP_FRAGMENT_WORDS:
         return True
     if any(phrase in qn for phrase in _FOLLOWUP_DETAIL_PHRASES):
@@ -407,6 +571,8 @@ def has_explicit_bil_topic(q: str) -> bool:
     qn = _norm(q)
     if not qn:
         return False
+    if _is_generic_context_query(qn):
+        return False
     words = set(qn.split())
     return bool(words & _BIL_TOPIC_TERMS)
 
@@ -414,6 +580,8 @@ def has_explicit_bil_topic(q: str) -> bool:
 def should_bind_to_recent_topic(q: str, history: List[Dict[str, str]]) -> bool:
     if not has_recent_bil_context(history):
         return False
+    if extract_followup_year(q):
+        return True
     if is_contextual_followup_fragment(q):
         return True
 
@@ -443,10 +611,49 @@ def has_recent_bil_context(history: List[Dict[str, str]], window: int = 6) -> bo
             return True
     return False
 
+
+def contextualize_query_from_history(q: str, history: List[Dict[str, str]]) -> str:
+    qn = normalize_query_aliases((q or "").strip())
+    if not qn or not has_recent_bil_context(history):
+        return qn
+
+    topic = last_active_topic(history) or last_user_message(history)
+    if not topic:
+        return qn
+
+    year = extract_followup_year(qn)
+    if year:
+        retargeted = _retarget_topic_year(topic, year)
+        return retargeted or qn
+
+    topic_n = _compact_topic(topic)
+    qn_compact = _compact_topic(qn) or qn
+
+    if _is_generic_context_query(qn) and topic_n:
+        return topic_n
+
+    if "report" in _norm(qn) and "annual report" in topic_n and not re.search(r"\b20\d{2}\b", qn):
+        return topic_n
+
+    if has_explicit_bil_topic(qn):
+        return qn
+
+    if should_bind_to_recent_topic(qn, history):
+        if topic_n and topic_n not in qn_compact:
+            pronoun_cleaned = re.sub(r"\b(it|this|that|them|those|these)\b", "", qn_compact)
+            pronoun_cleaned = re.sub(r"\s+", " ", pronoun_cleaned).strip()
+            if pronoun_cleaned:
+                return f"{pronoun_cleaned} {topic_n}".strip()
+            return topic_n
+    return qn
+
+
 def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
-    qn = _norm(q)
+    contextualized = _norm(contextualize_query_from_history(q, history))
+    qn = contextualized or _norm(q)
     expanded = [qn]
-    topic = _norm(last_user_topic(history))
+    topic = _norm(last_active_topic(history))
+    year = extract_followup_year(q)
 
     # Expand short fund-related asks so vector search has enough signal.
     if qn in {"pf", "ppf", "gf", "gfm", "provident", "gratuity", "fund", "funds"}:
@@ -457,6 +664,9 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
         expanded.append("private provident fund and gratuity fund bil")
         expanded.append("ppf employee registration contribution nominee refund form")
         expanded.append("loan against private provident fund ppf")
+
+    if year and topic:
+        expanded.append(_retarget_topic_year(topic, year))
 
     # Follow-ups like "how to fill this form", "for 2022", "details"
     if any(p in qn for p in ["this form", "that form", "fill this form", "fill the form", "details", "for 20"]):
@@ -495,6 +705,7 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
         out.append(part)
 
     return " ".join(out)
+
 
 def should_promote_unrelated_to_bil(
     q: str,
@@ -614,7 +825,7 @@ def build_form_query_variants(user_query: str, history: List[Dict[str, str]]) ->
     """
     General form query expansion:
     - If user says "form for X" -> try X + (application/proposal/claim)
-    - If user is vague -> use last user topic
+    - If user is vague -> use the most recent active topic from user/assistant history
     - Includes canonical mapping (loan -> loan application form; motor -> motor proposal/claim)
     """
     qn = _norm(user_query)
@@ -634,22 +845,31 @@ def build_form_query_variants(user_query: str, history: List[Dict[str, str]]) ->
             f"{topic} claim form",
         ]
 
-    # If vague -> use last user topic
+    # If vague -> use the most recent active topic in the conversation
     if is_vague_form_request(user_query):
-        topic = _norm(last_user_topic(history))
+        topic = _norm(last_active_topic(history))
         if topic:
-            variants += [
-                f"{topic} form",
-                f"{topic} application form",
-                f"{topic} proposal form",
-                f"{topic} claim form",
-            ]
+            topic_is_claim = bool(re.search(r"\b(claim|claims|intimation|settlement|settle)\b", topic))
+            variants.append(f"{topic} form")
+            if topic_is_claim:
+                variants += [
+                    f"{topic} claim form",
+                    "claim intimation form",
+                ]
+            else:
+                variants += [
+                    f"{topic} application form",
+                    f"{topic} proposal form",
+                    f"{topic} claim form",
+                ]
 
             # Canonical mappings (general-purpose, helps “housing loan form”)
             if "loan" in topic:
-                variants.append("loan application form")
+                variants.append("loan protection claim form" if topic_is_claim else "loan application form")
             if any(w in topic for w in ["motor", "car", "vehicle"]):
-                variants += ["motor proposal form", "motor claim form"]
+                variants += ["motor claim form"]
+                if not topic_is_claim:
+                    variants += ["motor proposal form"]
 
     # If user asked for a product + "form" but not exact type
     if "loan" in qn and "application" not in qn:
@@ -674,7 +894,7 @@ def build_document_query_variants(user_query: str, history: List[Dict[str, str]]
     variants: List[str] = [qn]
 
     years = re.findall(r"\b(20\d{2})\b", qn)
-    topic = _norm(last_user_topic(history))
+    topic = _norm(last_active_topic(history))
 
     if "annual report" in qn or "report" in qn:
         variants.append("annual report")
@@ -712,8 +932,6 @@ _ACTION_CUES = {
     "steps",
     "apply",
     "application",
-    "claim",
-    "claims",
     "required",
     "requirement",
     "requirements",
@@ -722,6 +940,53 @@ _ACTION_CUES = {
     "form",
     "download",
     "register",
+    "submit",
+    "settlement",
+    "settle",
+    "intimation",
+    "file",
+}
+_PROCESS_ACTION_PHRASES = {
+    "how to",
+    "how do i",
+    "what is the process",
+    "what is the procedure",
+    "claim process",
+    "application process",
+    "how to claim",
+    "how do i claim",
+    "how to apply",
+    "how do i apply",
+    "how to file",
+    "how do i file",
+    "file a claim",
+    "make a claim",
+    "claim settlement",
+    "documents required",
+    "required documents",
+    "what documents",
+    "what are the requirements",
+    "where to submit",
+    "what to do",
+}
+_CLAIM_PROCESS_TERMS = {
+    "file",
+    "submit",
+    "settlement",
+    "settle",
+    "intimation",
+    "intimate",
+    "report",
+    "documents",
+    "document",
+    "required",
+    "requirements",
+    "process",
+    "procedure",
+    "steps",
+    "step",
+    "form",
+    "download",
 }
 
 _PRODUCT_HINTS = {
@@ -782,11 +1047,117 @@ _EXTRA_PRODUCT_WORDS = {
 }
 
 
+def _extract_specific_loan_topic(text: str) -> str:
+    qn = _norm(text)
+    if not qn:
+        return ""
+
+    matches: List[str] = []
+    for keywords, link in _LOAN_PAGE_LINKS:
+        title = _norm(link.get("title", ""))
+        if not title:
+            continue
+        if title in qn:
+            matches.append(title)
+            continue
+        if "loan" not in qn:
+            continue
+        if any(re.search(rf"\b{re.escape(word)}\b", qn) for word in keywords):
+            matches.append(title)
+
+    ordered: List[str] = []
+    seen = set()
+    for item in matches:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+
+    if len(ordered) == 1:
+        return ordered[0]
+    if len(ordered) > 1:
+        return "loan"
+    return ""
+
+
+def _looks_like_claim_topic_text(text: str) -> bool:
+    qn = _norm(text)
+    if not qn:
+        return False
+
+    if re.search(
+        r"\b(motor|fire|travel|engineering|aviation|marine|liability|miscellaneous)\s+claims?\b",
+        qn,
+    ):
+        return True
+
+    claim_process_phrases = (
+        "claim form",
+        "claim intimation",
+        "claim process",
+        "claim procedure",
+        "claim settlement",
+        "file a claim",
+        "make a claim",
+        "how to claim",
+        "how do i claim",
+        "how to file the claim",
+        "how do i file the claim",
+        "submit the claim",
+    )
+    return any(phrase in qn for phrase in claim_process_phrases)
+
+
+def _extract_topic_from_history_text(text: str) -> str:
+    qn = _norm(text)
+    if not qn:
+        return ""
+
+    year_match = re.search(r"\b(20\d{2})\b", qn)
+    if "annual report" in qn:
+        return f"{year_match.group(1)} annual report" if year_match else "annual report"
+
+    loan_topic = _extract_specific_loan_topic(qn)
+    if loan_topic:
+        return loan_topic
+
+    products = _query_products(qn)
+    claimish = _looks_like_claim_topic_text(qn)
+
+    if len(products) == 1:
+        label = next(iter(products))
+        if label == "loan":
+            return "loan"
+        if label == "ppf":
+            return "ppf"
+        return f"{label} claim" if claimish else f"{label} insurance"
+
+    if len(products) > 1:
+        if "loan" in products and products <= {"loan", "ppf"}:
+            return "loan"
+        if claimish:
+            return "claim"
+        if products & {"motor", "fire", "travel", "engineering", "aviation", "marine", "liability", "misc"}:
+            return "insurance"
+
+    return ""
+
+
 def _is_actionable_query(q: str) -> bool:
     qn = _norm(q)
     if not qn:
         return False
+
+    if looks_like_form_request(q) or looks_like_form_download_request(q) or looks_like_document_download_request(q):
+        return True
+
     toks = set(qn.split())
+    if any(phrase in qn for phrase in _PROCESS_ACTION_PHRASES):
+        return True
+
+    if "claim" in toks or "claims" in toks:
+        return bool(toks & _CLAIM_PROCESS_TERMS)
+
     return bool(_ACTION_CUES & toks)
 
 
@@ -804,16 +1175,26 @@ def _infer_products(q: str, history: List[Dict[str, str]]) -> set[str]:
     if found:
         return found
 
-    topic = last_user_topic(history)
+    topic = last_active_topic(history)
     if topic:
         return _query_products(topic)
     return set()
 
 
+def _is_claim_context(q: str, history: Optional[List[Dict[str, str]]] = None) -> bool:
+    merged = _norm(q)
+    if history:
+        topic = _norm(last_active_topic(history) or last_user_message(history))
+        if topic:
+            merged = f"{merged} {topic}".strip()
+    claim_terms = {"claim", "claims", "intimation", "settlement", "settle"}
+    return any(re.search(rf"\b{re.escape(term)}\b", merged) for term in claim_terms)
+
+
 def _derive_action_form_queries(q: str, history: List[Dict[str, str]]) -> List[str]:
     products = _infer_products(q, history)
     qn = _norm(q)
-    is_claim = "claim" in qn
+    is_claim = _is_claim_context(q, history)
     explicit_form_ask = looks_like_form_request(q) or looks_like_form_download_request(q)
 
     candidates: List[str] = []
@@ -857,6 +1238,39 @@ def _derive_action_form_queries(q: str, history: List[Dict[str, str]]) -> List[s
     return out[:8]
 
 
+_FORM_RESULT_TERMS = {"form", "proposal", "application", "claim", "intimation", "registration", "nomination", "authorization", "refund", "mou"}
+_NONCLAIM_FORM_TERMS = {"proposal", "application", "registration", "nomination", "authorization", "refund", "mou"}
+_CLAIM_FORM_TERMS = {"claim", "intimation", "settlement"}
+
+
+def _is_form_like_download(item: Dict[str, str]) -> bool:
+    text = f"{item.get('title', '')} {item.get('url', '')}".lower()
+    return any(term in text for term in _FORM_RESULT_TERMS)
+
+
+def _filter_form_downloads_by_context(items: List[Dict[str, str]], is_claim: bool) -> List[Dict[str, str]]:
+    if not items:
+        return []
+
+    filtered = [item for item in items if _is_form_like_download(item)]
+    ordered = filtered or list(items)
+
+    claim_matches = [
+        item for item in ordered
+        if any(term in f"{item.get('title', '')} {item.get('url', '')}".lower() for term in _CLAIM_FORM_TERMS)
+    ]
+    nonclaim_matches = [
+        item for item in ordered
+        if any(term in f"{item.get('title', '')} {item.get('url', '')}".lower() for term in _NONCLAIM_FORM_TERMS)
+    ]
+
+    if is_claim and claim_matches:
+        return claim_matches
+    if not is_claim and nonclaim_matches:
+        return nonclaim_matches
+    return ordered
+
+
 def _dedupe_downloads(items: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, str]]:
     seen = set()
     out: List[Dict[str, str]] = []
@@ -883,7 +1297,7 @@ def _gather_action_downloads(q: str, history: List[Dict[str, str]]) -> List[Dict
         return []
 
     qn = _norm(q)
-    is_claim = "claim" in qn
+    is_claim = _is_claim_context(q, history)
     explicit_form_ask = looks_like_form_request(q) or looks_like_form_download_request(q)
 
     merged: List[Dict[str, str]] = []
@@ -899,18 +1313,12 @@ def _gather_action_downloads(q: str, history: List[Dict[str, str]]) -> List[Dict
             break
 
     deduped = _dedupe_downloads(merged, limit=8)
-    if explicit_form_ask:
-        return deduped[:6]
-
-    filtered: List[Dict[str, str]] = []
-    for d in deduped:
-        t = f"{d.get('title','')} {d.get('url','')}".lower()
-        if is_claim and "proposal" in t:
-            continue
-        if not is_claim and ("claim" in t or "intimation" in t):
-            continue
-        filtered.append(d)
-    return filtered[:6]
+    filtered = _filter_form_downloads_by_context(deduped, is_claim=is_claim)
+    if explicit_form_ask and filtered:
+        return filtered[:6]
+    if filtered:
+        return filtered[:6]
+    return deduped[:6]
 
 
 def _is_file_link(url: str) -> bool:
@@ -996,11 +1404,11 @@ def _extract_extra_products(text: str) -> set[str]:
 
 def _fallback_action_links(q: str, history: List[Dict[str, str]], limit: int = 3) -> List[Dict[str, str]]:
     qn = _norm(q)
-    history_topic = _norm(last_user_topic(history))
+    history_topic = _norm(last_active_topic(history))
     merged_text = f"{qn} {history_topic}".strip()
     products = _infer_products(merged_text, history) | _extract_extra_products(merged_text)
 
-    is_claim_flow = any(k in qn for k in ["claim", "intimation", "settlement"])
+    is_claim_flow = _is_claim_context(q, history)
     links: List[Dict[str, str]] = []
 
     if is_claim_flow:
@@ -1117,6 +1525,7 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     data.setdefault("answer", "")
     data.setdefault("answer_md", "")
     data.setdefault("client_delay_ms", None)
+    data.setdefault("suppress_help_closing", False)
 
     data["answer"] = strip_urls(str(data.get("answer", "")))
 
@@ -1138,7 +1547,7 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     data["answer_md"] = remove_question_lines_md(str(data.get("answer_md", "")))
 
     # Add a gentle closing help line (no question) only when missing
-    if data.get("intent") != "unrelated":
+    if data.get("intent") != "unrelated" and not data.get("suppress_help_closing"):
         if not has_help_closing(data.get("answer", "")) and not has_help_closing(data.get("answer_md", "")):
             if _HELP_CLOSINGS and random.random() < 0.6:
                 closing = random.choice(_HELP_CLOSINGS)
@@ -1178,8 +1587,9 @@ BEHAVIOR:
 - For BIL questions: answer ONLY using retrieved context.
 - If context is missing, set intent="not_found" and ask ONE clarifying question.
 - For unrelated questions: set intent="unrelated" and gently redirect.
-- For process/how-to/application/claim questions, provide one complete response in a single message:
+- For process/how-to/application questions, and for claim questions that explicitly ask about filing, documents, requirements, settlement, forms, or steps, provide one complete response in a single message:
   1) clear flow/steps, 2) short explanation for why each major step matters, 3) key requirements/documents (if known), 4) helpful links from ACTIONABLE RESOURCES, 5) mention downloads if attached.
+- If the user asks generally about a product or claim type (for example "tell me about motor claim"), start with a short overview of what it is, when it applies, and the key things to know. Only add a brief next-step summary if useful; do not jump straight into numbered steps unless the user asked for process details.
 
 DYNAMIC RESPONSE STYLE (IMPORTANT):
 - Match the response style to the user’s intent and how they asked.
@@ -1188,6 +1598,7 @@ DYNAMIC RESPONSE STYLE (IMPORTANT):
 - Use RECENT CHAT CONTEXT to interpret follow-up fragments and to avoid monotonous formatting.
 - Do not rely on exact keywords only; infer semantically similar asks and likely intent from context.
 - If the user asks for process/steps, explain slightly more than a bare checklist (brief rationale + practical notes).
+- If the user asks "tell me about", "more on", or a similar overview request, prefer a concise overview first rather than a procedure.
 - Then choose ONE layout below for answer_md (pick the most suitable; do not use all):
 
 LAYOUT TOOLBOX (choose 1):
@@ -1259,8 +1670,8 @@ def _llm() -> ChatOpenAI:
 # Main runner
 # =========================
 def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
-    q = normalize_query_aliases((query or "").strip())
-    if not q:
+    raw_q = normalize_query_aliases((query or "").strip())
+    if not raw_q:
         return finalize({
             "intent": "not_found",
             "answer": "Please type your question.",
@@ -1268,10 +1679,10 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "downloads": [],
             "sources": [],
             "confidence": "low",
-        }, user_query=q)
+        }, user_query=raw_q)
 
     # 0) Social intent
-    social = detect_social_intent(q)
+    social = detect_social_intent(raw_q)
     if social == "greeting":
         return finalize({
             "intent": "unrelated",
@@ -1281,7 +1692,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "sources": [],
             "confidence": "high",
             "client_delay_ms": 1500,
-        }, user_query=q)
+        }, user_query=raw_q)
 
     if social == "thanks":
         return finalize({
@@ -1292,7 +1703,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "sources": [],
             "confidence": "high",
             "client_delay_ms": 1500,
-        }, user_query=q)
+        }, user_query=raw_q)
 
     if social == "farewell":
         return finalize({
@@ -1303,7 +1714,26 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "sources": [],
             "confidence": "high",
             "client_delay_ms": 1500,
-        }, user_query=q)
+        }, user_query=raw_q)
+
+    q = contextualize_query_from_history(raw_q, history)
+
+    # 0b) Direct annual-report financial extraction for year-specific queries.
+    if not looks_like_document_download_request(q):
+        try:
+            fin_obj = json.loads(bil_extract_financial_fact.run(q))
+        except Exception:
+            fin_obj = {}
+        if isinstance(fin_obj, dict) and fin_obj.get("found"):
+            return finalize({
+                "intent": "bil_query",
+                "answer": str(fin_obj.get("answer", "") or ""),
+                "answer_md": str(fin_obj.get("answer_md", "") or fin_obj.get("answer", "")),
+                "downloads": [],
+                "sources": [],
+                "confidence": "high",
+                "suppress_help_closing": True,
+            }, user_query=q)
 
     # 1) Intent hint
     try:
@@ -1348,16 +1778,10 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
                 continue
 
         if merged:
-            is_claim = "claim" in _norm(q)
-            if not is_claim:
-                filtered = []
-                for item in merged:
-                    hay = f"{item.get('title', '')} {item.get('url', '')}".lower()
-                    if "claim" in hay or "intimation" in hay:
-                        continue
-                    filtered.append(item)
-                if filtered:
-                    merged = filtered
+            is_claim = _is_claim_context(q, history)
+            filtered = _filter_form_downloads_by_context(merged, is_claim=is_claim)
+            if filtered:
+                merged = filtered
 
             return finalize({
                 "intent": "form_request",
@@ -1370,7 +1794,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
 
         # Graceful fallback when no matching form exists
         if is_vague_form_request(q):
-            topic = last_user_topic(history)
+            topic = last_active_topic(history)
             if topic:
                 return finalize({
                     "intent": "not_found",
@@ -1450,7 +1874,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
 
     if not chunks:
         # Retry with prior topic for vague follow-ups.
-        retry_topic = last_user_topic(history) or last_user_message(history)
+        retry_topic = last_active_topic(history) or last_user_message(history)
         if retry_topic and _norm(retry_topic) != _norm(q):
             retry_query = retry_topic
             if should_bind_to_recent_topic(q, history):
