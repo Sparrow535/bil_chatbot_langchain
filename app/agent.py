@@ -76,6 +76,10 @@ _OVERVIEW_STYLE_HINTS = [
     "Do not jump into procedures, rates, forms, or document lists unless the user asked for them explicitly.",
     "If the topic is a claim type or product, explain what it is and when it applies before mentioning next steps.",
 ]
+_OPTIONS_STYLE_HINTS = [
+    "For broad lists of products or options, keep the intro to 1-2 short sentences and move the detail into bullets.",
+    "Group broader option lists into a few clear categories or representative examples instead of one long dense paragraph.",
+]
 _LOAN_RATE_STYLE_HINTS = [
     "For broad loan rate questions, summarize multiple loan products from the retrieved context. Do not answer with only one example if several loan rates are available.",
     "If the retrieved context appears partial, say the list includes examples and mention that other loan products are also available instead of implying the list is exhaustive.",
@@ -141,6 +145,7 @@ def build_style_hint(query: str, history: List[Dict[str, str]]) -> str:
     extras: List[str] = []
     if _is_general_overview_request(query):
         extras.extend(_OVERVIEW_STYLE_HINTS)
+        extras.append(random.choice(_OPTIONS_STYLE_HINTS))
     elif _is_actionable_query(query):
         extras.append(random.choice(_PROCESS_STYLE_HINTS))
 
@@ -511,6 +516,21 @@ _BIL_TOPIC_TERMS = {
     "branch", "branches", "contact", "contacts", "annual", "report", "reports",
     "financial", "income", "earnings",
 }
+_BROAD_INSURANCE_OVERVIEW_HINT = (
+    "insurance products personal accident auto insurance money insurance fire insurance enhanced rural policy "
+    "marine cargo transit fidelity guarantee aviation loan protection burglary machinery breakdown "
+    "construction project liability workmen compensation student care"
+)
+_BROAD_LOAN_OVERVIEW_HINT = (
+    "loan products personal loan housing loan transport loan agriculture and livestock loan "
+    "hotel and tourism loan loans to contractors loan for shares and securities "
+    "service sector loan trade and commerce loan production and manufacturing loan "
+    "forestry and logging loan mining and quarrying loan"
+)
+_BROAD_CLAIM_OVERVIEW_HINT = (
+    "motor insurance claim fire insurance claim travel insurance claim engineering insurance claim "
+    "aviation insurance claim marine insurance claim liability insurance claim miscellaneous insurance claim"
+)
 _YEAR_FOLLOWUP_RE = re.compile(
     r"^(?:for|in|about|what about|how about|same for|and for)?\s*(20\d{2})\??$",
     re.IGNORECASE,
@@ -656,6 +676,72 @@ def contextualize_query_from_history(q: str, history: List[Dict[str, str]]) -> s
 
 
 def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
+    queries = build_retrieval_queries(q, history)
+    return " ".join(queries)
+
+
+def _is_broad_insurance_overview_query(text: str) -> bool:
+    qn = _norm(text)
+    if not qn or _is_actionable_query(text):
+        return False
+    if _query_products(qn) or _extract_extra_products(qn):
+        return False
+    broad_cues = (
+        "insurance products",
+        "types of insurance",
+        "insurance options",
+        "insurance policies",
+        "what insurance",
+        "what policies",
+    )
+    if any(cue in qn for cue in broad_cues):
+        return True
+    return qn in {"insurance", "insurances", "policies", "products", "insurance products"}
+
+
+def _is_broad_loan_overview_query(text: str) -> bool:
+    qn = _norm(text)
+    if not qn or _is_actionable_query(text) or _is_broad_loan_rate_query(text):
+        return False
+    loan_topic = _extract_specific_loan_topic(qn)
+    if loan_topic and loan_topic != "loan":
+        return False
+    broad_cues = (
+        "loan products",
+        "types of loans",
+        "types of loan",
+        "loan options",
+        "what loans",
+        "loans offered",
+        "loans in bil",
+    )
+    if any(cue in qn for cue in broad_cues):
+        return True
+    return qn in {"loan", "loans", "bil loan", "bil loans"}
+
+
+def _is_broad_claim_overview_query(text: str) -> bool:
+    qn = _norm(text)
+    if not qn or _is_actionable_query(text):
+        return False
+    if _looks_like_claim_topic_text(qn):
+        return False
+    broad_cues = ("claim types", "types of claims", "claim products", "claims in bil", "claims offered")
+    if any(cue in qn for cue in broad_cues):
+        return True
+    return qn in {"claim", "claims", "insurance claim", "insurance claims"}
+
+
+def _wants_diverse_retrieval(text: str) -> bool:
+    return (
+        _is_broad_loan_rate_query(text)
+        or _is_broad_loan_overview_query(text)
+        or _is_broad_insurance_overview_query(text)
+        or _is_broad_claim_overview_query(text)
+    )
+
+
+def build_retrieval_queries(q: str, history: List[Dict[str, str]]) -> List[str]:
     contextualized = _norm(contextualize_query_from_history(q, history))
     qn = contextualized or _norm(q)
     expanded = [qn]
@@ -679,9 +765,21 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
         expanded.append("loan interest rates bil")
         expanded.append(_BROAD_LOAN_RATE_RETRIEVAL_HINT)
 
+    if _is_broad_loan_overview_query(qn):
+        expanded.append("loan products bil")
+        expanded.append(_BROAD_LOAN_OVERVIEW_HINT)
+
+    if _is_broad_insurance_overview_query(qn):
+        expanded.append("insurance products bil")
+        expanded.append(_BROAD_INSURANCE_OVERVIEW_HINT)
+
+    if _is_broad_claim_overview_query(qn):
+        expanded.append("insurance claims bil")
+        expanded.append(_BROAD_CLAIM_OVERVIEW_HINT)
+
     # Follow-ups like "how to fill this form", "for 2022", "details"
     if any(p in qn for p in ["this form", "that form", "fill this form", "fill the form", "details", "for 20"]):
-        if topic:
+        if topic and topic not in qn:
             expanded.append(f"{qn} {topic}")
             expanded.append(topic)
 
@@ -691,12 +789,12 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
 
     # Use recent user context for very short follow-ups.
     if len(qn.split()) <= 2:
-        if topic and topic != qn:
+        if topic and topic != qn and topic not in qn:
             expanded.append(f"{qn} {topic}")
 
     # Follow-up questions should inherit the prior topic.
     if should_bind_to_recent_topic(q, history):
-        if topic and topic != qn:
+        if topic and topic != qn and topic not in qn:
             expanded.append(f"{topic} {qn}")
             expanded.append(f"{qn} {topic}")
             expanded.append(topic)
@@ -715,8 +813,78 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
         seen.add(part)
         out.append(part)
 
-    return " ".join(out)
+    return out[:8]
 
+
+def _retrieve_context_once(query_text: str) -> List[Dict[str, Any]]:
+    try:
+        ctx_json = bil_retrieve_context.run(query_text)
+        ctx_obj = json.loads(ctx_json)
+        return ctx_obj.get("chunks", []) or []
+    except Exception:
+        return []
+
+
+def _merge_retrieved_chunks(
+    query_variants: List[str],
+    broad: bool = False,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    for q_index, query_text in enumerate(query_variants):
+        chunks = _retrieve_context_once(query_text)
+        for rank, chunk in enumerate(chunks):
+            content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
+            if not content:
+                continue
+            source = str(chunk.get("source") or "").strip()
+            title = str(chunk.get("title") or "").strip()
+            key = "||".join([
+                source.lower().rstrip("/"),
+                title.lower(),
+                content[:260].lower(),
+            ])
+            try:
+                base_score = float(chunk.get("score", 0.0))
+            except Exception:
+                base_score = 0.0
+            sort_score = base_score + max(0.0, 0.05 - (0.01 * q_index)) + max(0.0, 0.03 - (0.004 * rank))
+            candidate = {
+                "content": content,
+                "source": source,
+                "title": title,
+                "score": base_score,
+                "_sort_score": sort_score,
+            }
+            current = merged.get(key)
+            if current is None or sort_score > float(current.get("_sort_score", 0.0)):
+                merged[key] = candidate
+
+    ordered = list(merged.values())
+    ordered.sort(key=lambda item: float(item.get("_sort_score", 0.0)), reverse=True)
+    if broad:
+        first_pass: List[Dict[str, Any]] = []
+        leftovers: List[Dict[str, Any]] = []
+        seen_sources = set()
+        for item in ordered:
+            source_key = (item.get("source") or item.get("title") or "").strip().lower()
+            if source_key and source_key not in seen_sources:
+                seen_sources.add(source_key)
+                first_pass.append(item)
+            else:
+                leftovers.append(item)
+        ordered = first_pass + leftovers
+
+    max_items = limit or (max(settings.top_k + 4, 10) if broad else max(settings.top_k, 6))
+    cleaned: List[Dict[str, Any]] = []
+    for item in ordered[:max_items]:
+        cleaned.append({
+            "content": item.get("content", ""),
+            "source": item.get("source", ""),
+            "title": item.get("title", ""),
+            "score": item.get("score", 0.0),
+        })
+    return cleaned
 
 def should_promote_unrelated_to_bil(
     q: str,
@@ -736,12 +904,7 @@ def should_promote_unrelated_to_bil(
         return False, []
 
     def _probe(query_text: str) -> List[Dict[str, Any]]:
-        try:
-            probe_json = bil_retrieve_context.run(query_text)
-            probe_obj = json.loads(probe_json)
-            return probe_obj.get("chunks", []) or []
-        except Exception:
-            return []
+        return _retrieve_context_once(query_text)
 
     def _best_score(chunks: List[Dict[str, Any]]) -> float:
         best_local = 0.0
@@ -792,8 +955,12 @@ def should_promote_unrelated_to_bil(
     if not can_use_context_rescue:
         return False, []
 
-    probe_query = build_retrieval_query(q, history)
-    ctx_chunks = _probe(probe_query)
+    probe_queries = build_retrieval_queries(q, history)
+    ctx_chunks = _merge_retrieved_chunks(
+        probe_queries,
+        broad=_wants_diverse_retrieval(q),
+        limit=max(settings.top_k + 2, 8),
+    )
     if not ctx_chunks:
         return False, []
 
@@ -1004,7 +1171,7 @@ _PRODUCT_HINTS = {
     "motor": {"motor", "vehicle", "car", "auto"},
     "fire": {"fire"},
     "travel": {"travel"},
-    "loan": {"loan", "housing", "transport", "personal", "contractor", "tourism", "hotel", "agriculture", "livestock", "shares", "securities"},
+    "loan": {"loan", "loans", "housing", "transport", "personal", "contractor", "tourism", "hotel", "agriculture", "livestock", "shares", "securities"},
     "ppf": {"ppf", "provident", "gratuity", "gf", "gfm"},
 }
 
@@ -1549,6 +1716,79 @@ def _append_links_to_answer_md(md: str, links: List[Dict[str, str]], has_downloa
     return body
 
 
+
+def _describe_request_scope(q: str, history: List[Dict[str, str]]) -> str:
+    qn = _norm(q)
+    topic = _compact_topic(last_active_topic(history))
+    year_match = re.search(r"\b(20\d{2})\b", qn)
+    year = extract_followup_year(q) or (year_match.group(1) if year_match else "")
+
+    if year and "annual report" in topic:
+        return f"the {year} annual report"
+
+    specific_loan = _extract_specific_loan_topic(qn or topic)
+    if specific_loan and specific_loan != "loan":
+        return specific_loan
+
+    products = _infer_products(qn, history) | _extract_extra_products(qn) | _extract_extra_products(topic)
+    if "travel" in products:
+        return "travel insurance"
+    if "motor" in products:
+        return "motor claim" if _is_claim_context(q, history) else "motor insurance"
+    if "fire" in products:
+        return "fire claim" if _is_claim_context(q, history) else "fire insurance"
+    if "loan" in products:
+        if _is_broad_loan_rate_query(q) or _is_broad_loan_overview_query(q):
+            return "BIL loan products"
+        return "loan products"
+    if not products and ("insurance" in qn or "policies" in qn):
+        return "BIL insurance products"
+    if not products and ("loan" in qn or "loans" in qn):
+        return "BIL loan products"
+    if not products and ("claim" in qn or "claims" in qn):
+        return "BIL claims information"
+    if "ppf" in products:
+        return "PPF/GF services"
+    if year:
+        return f"the {year} report"
+    if topic:
+        return topic
+    return ""
+
+
+def _build_not_found_response(q: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
+    scope = _describe_request_scope(q, history)
+    if _wants_diverse_retrieval(q):
+        subject = scope or "that BIL topic"
+        answer = (
+            f"I couldn’t pull a reliable full overview of {subject} from the indexed BIL content yet. "
+            "If you narrow it to one product, coverage area, rate, or report year, I can answer more precisely."
+        )
+    elif should_bind_to_recent_topic(q, history):
+        subject = scope or "that follow-up"
+        answer = (
+            f"I couldn’t pull enough indexed detail for {subject} yet. "
+            "If you repeat the product or report name in the request, I can narrow it better."
+        )
+    elif scope:
+        answer = (
+            f"I couldn’t pull enough indexed detail for {scope} yet. "
+            "If you ask for a specific part like coverage, documents, process, rates, or the form, I can narrow it better."
+        )
+    else:
+        answer = (
+            "I couldn’t pull enough indexed detail for that request yet. "
+            "If you mention the product, form, or report year, I can narrow it better."
+        )
+    return {
+        "intent": "not_found",
+        "answer": answer,
+        "answer_md": answer,
+        "downloads": [],
+        "sources": [],
+        "confidence": "low",
+    }
+
 def enforce_downloads_rules(data: Dict[str, Any], user_query: str) -> None:
     """
     Keep downloads controlled:
@@ -1613,15 +1853,18 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     data["answer"] = remove_question_sentences(str(data.get("answer", "")))
     data["answer_md"] = remove_question_lines_md(str(data.get("answer_md", "")))
 
-    # Add a gentle closing help line (no question) only when missing
-    if data.get("intent") != "unrelated" and not data.get("suppress_help_closing"):
-        if not has_help_closing(data.get("answer", "")) and not has_help_closing(data.get("answer_md", "")):
-            if _HELP_CLOSINGS and random.random() < 0.6:
+    # Add a gentle closing only to shorter informational replies; long answers and download replies already feel complete.
+    answer_text = str(data.get("answer", "") or "")
+    has_downloads = bool(data.get("downloads"))
+    if data.get("intent") != "unrelated" and not data.get("suppress_help_closing") and not has_downloads:
+        if not has_help_closing(answer_text) and not has_help_closing(data.get("answer_md", "")):
+            if _HELP_CLOSINGS and len(answer_text) <= 220 and random.random() < 0.35:
                 closing = random.choice(_HELP_CLOSINGS)
                 if closing not in data["answer"]:
                     data["answer"] = (data["answer"] + " " + closing).strip() if data["answer"] else closing
                 if closing not in data["answer_md"]:
                     data["answer_md"] = (data["answer_md"] + f"\n\n{closing}").strip() if data["answer_md"] else closing
+
 
     return data
 
@@ -1698,6 +1941,7 @@ LAYOUT TOOLBOX (choose 1):
 
 STYLE:
 - answer_md should use headings (if absolutely necessary), bullets, and line breaks for readability.
+- Keep the opening paragraph short. If there are several facts or options, move them into bullets instead of packing them into the intro.
 - Keep it concise but complete: prefer 1–3 short sections, typically 5–10 bullets total. For broad loan-rate/product-list questions, it is fine to exceed this slightly so the list does not become misleadingly incomplete.
 - Do NOT end with a question. If you add a closing, make it a brief helpful statement (no question) and vary the wording.
 - Avoid “brochure tone” for personal questions; sound like helpful support staff.
@@ -1929,16 +2173,16 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         }, user_query=q)
 
     # 4) BIL Query: retrieve context + ask LLM
+    broad_retrieval = _wants_diverse_retrieval(q)
     if prefetched_chunks:
         chunks = prefetched_chunks
     else:
-        try:
-            retrieval_query = build_retrieval_query(q, history)
-            ctx_json = bil_retrieve_context.run(retrieval_query)
-            ctx_obj = json.loads(ctx_json)
-            chunks = ctx_obj.get("chunks", []) or []
-        except Exception:
-            chunks = []
+        retrieval_queries = build_retrieval_queries(q, history)
+        chunks = _merge_retrieved_chunks(
+            retrieval_queries,
+            broad=broad_retrieval,
+            limit=max(settings.top_k + 4, 10) if broad_retrieval else max(settings.top_k, 6),
+        )
 
     if not chunks:
         # Retry with prior topic for vague follow-ups.
@@ -1947,24 +2191,19 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             retry_query = retry_topic
             if should_bind_to_recent_topic(q, history):
                 retry_query = f"{retry_topic} {q}".strip()
-            try:
-                ctx_json = bil_retrieve_context.run(retry_query)
-                ctx_obj = json.loads(ctx_json)
-                chunks = ctx_obj.get("chunks", []) or []
-            except Exception:
-                chunks = []
+            retry_queries = build_retrieval_queries(retry_query, history)
+            retry_broad = broad_retrieval or _wants_diverse_retrieval(retry_query)
+            chunks = _merge_retrieved_chunks(
+                retry_queries,
+                broad=retry_broad,
+                limit=max(settings.top_k + 4, 10) if retry_broad else max(settings.top_k, 6),
+            )
 
     if not chunks:
-        return finalize({
-            "intent": "not_found",
-            "answer": "I don’t have that information for a specific product. If you want details, tell me which insurance or loan product.",
-            "answer_md": "I don’t have that information for a specific product.\n\nIf you want details, tell me which insurance or loan product.",
-            "downloads": [],
-            "sources": [],
-            "confidence": "low",
-        }, user_query=q)
+        return finalize(_build_not_found_response(q, history), user_query=q)
 
-    context_limit = max(settings.top_k, 10) if _is_broad_loan_rate_query(q) else settings.top_k
+    context_limit = max(settings.top_k + 4, 10) if broad_retrieval else settings.top_k
+
     context = "\n\n".join([f"- {c.get('content','')}" for c in chunks[:context_limit]])
     history_context = build_recent_history_context(history)
     style_hint = build_style_hint(q, history)
@@ -2019,6 +2258,17 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
                     return finalize(obj, user_query=q)
         except Exception:
             pass
+
+        fallback_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(out or "").strip(), flags=re.IGNORECASE | re.MULTILINE).strip()
+        if fallback_text and not fallback_text.startswith("{"):
+            return finalize({
+                "intent": "bil_query",
+                "answer": fallback_text,
+                "answer_md": fallback_text,
+                "downloads": action_downloads,
+                "sources": [],
+                "confidence": "medium",
+            }, user_query=q)
 
         return finalize({
             "intent": "not_found",
