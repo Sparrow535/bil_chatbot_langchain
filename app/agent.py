@@ -76,6 +76,10 @@ _OVERVIEW_STYLE_HINTS = [
     "Do not jump into procedures, rates, forms, or document lists unless the user asked for them explicitly.",
     "If the topic is a claim type or product, explain what it is and when it applies before mentioning next steps.",
 ]
+_LOAN_RATE_STYLE_HINTS = [
+    "For broad loan rate questions, summarize multiple loan products from the retrieved context. Do not answer with only one example if several loan rates are available.",
+    "If the retrieved context appears partial, say the list includes examples and mention that other loan products are also available instead of implying the list is exhaustive.",
+]
 _STYLE_TAGS = {
     "numbered": re.compile(r"(^|\n)\s*\d+\.\s", re.IGNORECASE),
     "key_points": re.compile(r"\bkey points\b", re.IGNORECASE),
@@ -139,6 +143,9 @@ def build_style_hint(query: str, history: List[Dict[str, str]]) -> str:
         extras.extend(_OVERVIEW_STYLE_HINTS)
     elif _is_actionable_query(query):
         extras.append(random.choice(_PROCESS_STYLE_HINTS))
+
+    if _is_broad_loan_rate_query(query):
+        extras.append(random.choice(_LOAN_RATE_STYLE_HINTS))
 
     if len(qn.split()) <= 4 or is_affirmative_reply(query):
         extras.append(random.choice(_FOLLOWUP_STYLE_HINTS))
@@ -668,6 +675,10 @@ def build_retrieval_query(q: str, history: List[Dict[str, str]]) -> str:
     if year and topic:
         expanded.append(_retarget_topic_year(topic, year))
 
+    if _is_broad_loan_rate_query(qn):
+        expanded.append("loan interest rates bil")
+        expanded.append(_BROAD_LOAN_RATE_RETRIEVAL_HINT)
+
     # Follow-ups like "how to fill this form", "for 2022", "details"
     if any(p in qn for p in ["this form", "that form", "fill this form", "fill the form", "details", "for 20"]):
         if topic:
@@ -1143,6 +1154,62 @@ def _extract_topic_from_history_text(text: str) -> str:
     return ""
 
 
+_BROAD_LOAN_RATE_RETRIEVAL_HINT = (
+    "loan interest rates loan against pf personal mortgaged loan housing loan "
+    "transport commercial loan transport non-commercial loan agriculture and livestock loan "
+    "hotel and tourism loan loans to contractors loan for shares and securities "
+    "service sector loan trade and commerce loan production and manufacturing loan "
+    "forestry and logging loan mining and quarrying loan"
+)
+
+
+def _is_broad_loan_rate_query(text: str) -> bool:
+    qn = _norm(text)
+    if not qn:
+        return False
+
+    rate_cues = ("interest rate", "interest rates", "loan rate", "loan rates", "rates")
+    if not any(cue in qn for cue in rate_cues):
+        return False
+
+    if any(term in qn for term in ["premium", "premiums", "insurance premium"]):
+        return False
+
+    loan_topic = _extract_specific_loan_topic(qn)
+    if loan_topic and loan_topic != "loan":
+        return False
+
+    broad_cues = ("various", "different", "some", "their", "all", "available", "offered", "offer")
+    loanish = any(
+        term in qn
+        for term in [
+            "loan",
+            "loans",
+            "housing",
+            "personal",
+            "transport",
+            "shares",
+            "securities",
+            "contractor",
+            "tourism",
+            "hotel",
+            "agriculture",
+            "livestock",
+            "service sector",
+            "trade",
+            "commerce",
+            "production",
+            "manufacturing",
+            "forestry",
+            "logging",
+            "mining",
+            "quarrying",
+            "bil",
+        ]
+    )
+    return loanish and ("loan" in qn or "loans" in qn or any(cue in qn for cue in broad_cues))
+
+
 def _is_actionable_query(q: str) -> bool:
     qn = _norm(q)
     if not qn:
@@ -1599,6 +1666,7 @@ DYNAMIC RESPONSE STYLE (IMPORTANT):
 - Do not rely on exact keywords only; infer semantically similar asks and likely intent from context.
 - If the user asks for process/steps, explain slightly more than a bare checklist (brief rationale + practical notes).
 - If the user asks "tell me about", "more on", or a similar overview request, prefer a concise overview first rather than a procedure.
+- For broad product/rate questions, do not imply the list is exhaustive unless the retrieved context clearly supports that. If you show a subset, say it includes some key products and note that other products are also available.
 - Then choose ONE layout below for answer_md (pick the most suitable; do not use all):
 
 LAYOUT TOOLBOX (choose 1):
@@ -1630,7 +1698,7 @@ LAYOUT TOOLBOX (choose 1):
 
 STYLE:
 - answer_md should use headings (if absolutely necessary), bullets, and line breaks for readability.
-- Keep it concise but complete: prefer 1–3 short sections, typically 5–10 bullets total.
+- Keep it concise but complete: prefer 1–3 short sections, typically 5–10 bullets total. For broad loan-rate/product-list questions, it is fine to exceed this slightly so the list does not become misleadingly incomplete.
 - Do NOT end with a question. If you add a closing, make it a brief helpful statement (no question) and vary the wording.
 - Avoid “brochure tone” for personal questions; sound like helpful support staff.
 - NO need to provide headers for all the answers; give headers for only the most relevant answers.
@@ -1896,7 +1964,8 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "confidence": "low",
         }, user_query=q)
 
-    context = "\n\n".join([f"- {c.get('content','')}" for c in chunks[: settings.top_k]])
+    context_limit = max(settings.top_k, 10) if _is_broad_loan_rate_query(q) else settings.top_k
+    context = "\n\n".join([f"- {c.get('content','')}" for c in chunks[:context_limit]])
     history_context = build_recent_history_context(history)
     style_hint = build_style_hint(q, history)
 

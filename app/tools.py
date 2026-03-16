@@ -441,9 +441,18 @@ def bil_retrieve_context(query: str) -> str:
 
     qn = (query or "").lower()
     fund_terms = {"ppf", "provident", "gratuity", "gf", "gfm", "private provident"}
+    loan_rate_terms = {"interest rate", "interest rates", "loan rate", "loan rates", "rates"}
+    loan_scope_terms = {
+        "loan", "loans", "housing", "personal", "transport", "shares", "securities",
+        "contractor", "tourism", "hotel", "agriculture", "livestock", "service sector",
+        "trade", "commerce", "production", "manufacturing", "forestry", "logging",
+        "mining", "quarrying",
+    }
     k = settings.top_k
     if any(t in qn for t in fund_terms):
         k = max(settings.top_k, 8)
+    if any(t in qn for t in loan_rate_terms) and any(t in qn for t in loan_scope_terms):
+        k = max(k, 14)
 
     # Use raw scores and normalize to 0..1 to avoid invalid relevance warnings
     docs = vectorstore.similarity_search_with_score(query, k=k)
