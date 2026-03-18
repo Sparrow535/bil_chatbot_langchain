@@ -1018,7 +1018,7 @@ select {
   #chat-widget {
     --chat-edge-gap: 10px;
     --chat-fab-size: 58px;
-    --chat-panel-width: min(92vw, 360px);
+    --chat-panel-width: clamp(240px, 75vw, 320px);
     --chat-panel-radius: 16px;
     --chat-panel-offset: calc(var(--chat-fab-size) + 10px);
   }
@@ -1107,7 +1107,7 @@ select {
 @media (max-width: 360px) {
   #chat-widget {
     --chat-fab-size: 56px;
-    --chat-panel-width: min(94vw, 330px);
+    --chat-panel-width: clamp(220px, 75vw, 280px);
   }
   #chat-panel {
     height: min(480px, 64vh, var(--chat-panel-max-height));
