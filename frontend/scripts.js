@@ -338,6 +338,54 @@
     return /form|forms|pdf|download|document|documents|file|files/.test(q);
   }
 
+  function readComposerText() {
+    return String((inputEl && inputEl.value) || "").trim();
+  }
+
+  function isEventLike(value) {
+    return !!(
+      value &&
+      typeof value === "object" &&
+      (typeof value.preventDefault === "function" ||
+        typeof value.stopPropagation === "function" ||
+        (typeof value.type === "string" && "target" in value))
+    );
+  }
+
+  function normalizeOutgoingText(value) {
+    const fallback = readComposerText();
+
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (/^\[object\s+\w*Event\]$/i.test(text)) return fallback;
+      return text || fallback;
+    }
+
+    if (isEventLike(value)) {
+      try {
+        value.preventDefault();
+      } catch {}
+      try {
+        value.stopPropagation();
+      } catch {}
+
+      const currentTarget = value.currentTarget;
+      if (currentTarget && currentTarget.form) {
+        const field = currentTarget.form.querySelector("#chat-input, input[type='text'], textarea");
+        if (field && typeof field.value === "string" && field.value.trim()) {
+          return field.value.trim();
+        }
+      }
+      return fallback;
+    }
+
+    if (value == null) return fallback;
+
+    const text = String(value).trim();
+    if (/^\[object\s+\w*Event\]$/i.test(text)) return fallback;
+    return text || fallback;
+  }
+
   // little dots animation via JS (no extra CSS needed)
   function randomDelay() {
     return (
@@ -588,8 +636,9 @@
   // API calls
   // =====================
   async function sendMessageToAPI(message) {
+    const normalizedMessage = normalizeOutgoingText(message);
     const payload = {
-      message,
+      message: normalizedMessage,
       history: history.slice(-8),
       session_id: sessionId,
     };
@@ -631,9 +680,9 @@
   async function sendMessage(messageOverride = "") {
     if (isAssistantBusy || sttInFlight) return;
 
-    const overrideText = typeof messageOverride === "string" ? messageOverride : "";
-    const text = String(overrideText || inputEl.value || "").trim();
+    const text = normalizeOutgoingText(messageOverride);
     if (!text) return;
+    const usedOverrideText = typeof messageOverride === "string" && messageOverride.trim() === text;
 
     if (composerNormal && composerNormal.classList.contains("hinting")) {
       showHint("");
@@ -643,7 +692,7 @@
     addTextMessage(text, "outgoing");
     history.push({ role: "user", content: text });
 
-    if (!overrideText) {
+    if (!usedOverrideText) {
       inputEl.value = "";
     }
 
@@ -695,9 +744,15 @@
     }
   }
 
-  sendBtn.addEventListener("click", () => sendMessage());
+  sendBtn.addEventListener("click", (e) => sendMessage(e));
+  sendBtn.addEventListener("pointerup", (e) => {
+    e.preventDefault();
+  });
   inputEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") sendMessage();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      sendMessage();
+    }
   });
 
   // =====================

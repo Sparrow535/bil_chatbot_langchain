@@ -80,17 +80,35 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ---------- Chat ----------
-  function sendMessage() {
-    const text = inputEl.value.trim();
+  function normalizeOutgoingText(value) {
+    if (typeof value === "string") return value.trim();
+    if (
+      value &&
+      typeof value === "object" &&
+      (typeof value.preventDefault === "function" || typeof value.type === "string")
+    ) {
+      try {
+        value.preventDefault();
+      } catch {}
+      return inputEl.value.trim();
+    }
+    return inputEl.value.trim();
+  }
+
+  function sendMessage(messageOverride = "") {
+    const text = normalizeOutgoingText(messageOverride);
     if (!text) return;
     addMessage(text, "outgoing");
     inputEl.value = "";
     botReply(text);
   }
 
-  sendBtn.addEventListener("click", sendMessage);
+  sendBtn.addEventListener("click", (e) => sendMessage(e));
   inputEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") sendMessage();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      sendMessage();
+    }
   });
 
   // ---------- Open/close ----------
