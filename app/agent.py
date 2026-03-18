@@ -17,6 +17,7 @@ from app.text_utils import (
 )
 from app.tools import (
     bil_extract_financial_fact,
+    bil_get_form_context,
     bil_get_forms,
     bil_get_documents,
     bil_retrieve_context,
@@ -46,13 +47,14 @@ parser = PydanticOutputParser(pydantic_object=AgentResponse)
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _HELP_CLOSINGS = [
-    "Let me know if you need anything else.",
-    "I’m here if you need anything else.",
-    "Happy to help if you need anything else.",
-    "I can help with anything else you need.",
-    "If you need more help, I’m here.",
-    "I’m here to help with anything else you need.",
-    "Glad to help anytime you need more support.",
+    "I can also help with other BIL questions if needed.",
+    "I can help further with BIL products, claims, loans, or forms.",
+    "I can continue with the next BIL detail whenever needed.",
+]
+_CLOSING_STYLE_HINTS = [
+    "Keep the closing warm but restrained, like support staff wrapping up a useful reply.",
+    "Make the closing specific to the topic when possible, instead of using a generic help phrase.",
+    "Use one short sentence with no question mark and no markdown.",
 ]
 _STYLE_HINTS = [
     "Start with a direct one-line answer, then add 3-6 focused bullets with concrete details.",
@@ -70,6 +72,16 @@ _PROCESS_STYLE_HINTS = [
 _FOLLOWUP_STYLE_HINTS = [
     "Treat short follow-ups as continuation of prior context and answer directly without repeating generic intros.",
     "Keep follow-up responses concise but specific, with one short context reminder only if needed.",
+]
+_GREETING_STYLE_HINTS = [
+    "Greet naturally and keep it concise, like a helpful assistant on the BIL website.",
+    "Offer help with BIL topics without sounding scripted or overly formal.",
+    "If there is recent BIL context, you may lightly mention continuing that topic.",
+]
+_UNRELATED_STYLE_HINTS = [
+    "Sound natural and direct, like support staff acknowledging the user's topic before redirecting.",
+    "Keep the wording graceful and specific; avoid canned apology phrases unless they fit naturally.",
+    "Vary the phrasing so the reply does not sound repeated across unrelated questions.",
 ]
 _OVERVIEW_STYLE_HINTS = [
     "For broad or overview requests, start with a short plain-language overview, then list the main types or key points with one-line descriptions.",
@@ -162,9 +174,23 @@ def build_style_hint(query: str, history: List[Dict[str, str]]) -> str:
 # =========================
 # Social intents
 # =========================
-_GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening", "kuzuzangpo", "kuzuzangpo la", "kuzu"}
+_GREETINGS = {
+    "hello", "hi", "hey", "hola", "greetings", "namaste",
+    "good morning", "good afternoon", "good evening",
+    "kuzuzangpo", "kuzuzangpo la", "kuzuzangpola", "kuzu",
+}
+_GREETING_SINGLE_WORDS = {"hello", "hi", "hey", "hola", "greetings", "namaste", "kuzuzangpo", "kuzuzangpola", "kuzu"}
+_GREETING_PATTERNS = [
+    re.compile(r"^(hello|hi|hey|hola|greetings|namaste|good morning|good afternoon|good evening|kuzuzangpo|kuzuzangpo la|kuzuzangpola|kuzu)(\s+norbu)?$", re.IGNORECASE),
+]
 _FAREWELLS = {"bye", "goodbye", "see you", "see ya", "take care", "later", "okay", "ok"}
 _THANKS = {"thanks", "thank you", "thx", "thanks a lot", "appreciate it"}
+_IDENTITY_PATTERNS = [
+    re.compile(r"^(who are you|what are you|tell me about yourself|introduce yourself)$", re.IGNORECASE),
+    re.compile(r"^(what is your name|what s your name|your name|who is norbu|are you norbu)$", re.IGNORECASE),
+    re.compile(r"^(who am i chatting with|who am i talking to)$", re.IGNORECASE),
+    re.compile(r"^(what can you do|how can you help|what do you do)$", re.IGNORECASE),
+]
 _TOPIC_PREFIX_RE = re.compile(
     r"^(tell me about|tell me more about|tell me|explain|describe|what is|what are|"
     r"more on|what about|can you tell me about|can you explain|"
@@ -216,13 +242,38 @@ def normalize_query_aliases(text: str) -> str:
 
 def detect_social_intent(q: str) -> Optional[str]:
     qn = _norm(q)
-    if qn in _GREETINGS:
+    tokens = qn.split()
+    compact_greeting = " ".join(tok for tok in tokens if tok not in {"norbu", "la"}).strip()
+
+    if (
+        qn in _GREETINGS
+        or compact_greeting in _GREETINGS
+        or compact_greeting in _GREETING_SINGLE_WORDS
+        or any(p.search(qn) for p in _GREETING_PATTERNS)
+    ):
         return "greeting"
     if qn in _FAREWELLS:
         return "farewell"
     if qn in _THANKS:
         return "thanks"
+    if any(p.search(qn) for p in _IDENTITY_PATTERNS):
+        return "identity"
     return None
+
+
+def build_identity_reply(q: str) -> tuple[str, str]:
+    qn = _norm(q)
+    if any(term in qn for term in ["what can you do", "how can you help", "what do you do"]):
+        answer = (
+            "I’m Norbu, the AI assistant for Bhutan Insurance Limited. "
+            "I can help with BIL insurance products, claims, loans, forms, branches, contact details, and annual reports."
+        )
+    else:
+        answer = (
+            "I’m Norbu, the AI assistant for Bhutan Insurance Limited. "
+            "I’m here to help with BIL insurance, claims, loans, forms, contact details, and annual reports."
+        )
+    return answer, repair_markdown_from_text(answer)
 
 
 # =========================
@@ -257,6 +308,38 @@ def repair_markdown_from_text(text: str) -> str:
         return ""
     t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"(\. )", ".\n", t)  # sentence line breaks
+    return t.strip()
+
+def markdown_to_plain_text(md: str) -> str:
+    t = _URL_RE.sub("", md or "")
+    if not t:
+        return ""
+    t = re.sub(r"(?m)^\s*#{1,6}\s*", "", t)
+    t = re.sub(r"\*\*(.*?)\*\*", r"\1", t)
+    t = re.sub(r"__(.*?)__", r"\1", t)
+    t = re.sub(r"`([^`]*)`", r"\1", t)
+    lines: List[str] = []
+    for raw in t.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        line = re.sub(r"^\s*[-*]\s+", "", line)
+        line = re.sub(r"^\s*\d+\.\s+", "", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+def normalize_form_markdown(md: str) -> str:
+    t = _URL_RE.sub("", md or "")
+    if not t:
+        return ""
+    t = t.replace("\r\n", "\n")
+    t = re.sub(r"([.!])\s+(\*\*)", r"\1\n\n\2", t)
+    t = re.sub(r"\s+(\*\*)", r"\n\n\1", t)
+    t = re.sub(r"(\*\*[^*]+\*\*)\s*-\s*", r"\1\n- ", t)
+    t = re.sub(r"\s+-\s+", "\n- ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()
 
 def strip_urls(text: str) -> str:
@@ -300,11 +383,15 @@ def force_no_sources(data: Dict[str, Any]) -> None:
     data["sources"] = []
 
 def normalize_form_answer(data: Dict[str, Any]) -> None:
-    # If it's a form_request and downloads exist, keep text short and consistent
-    if data.get("intent") == "form_request" and data.get("downloads"):
+    if data.get("intent") != "form_request" or not data.get("downloads"):
+        return
+
+    answer = str(data.get("answer", "") or "").strip()
+    if not answer:
         data["answer"] = "I found the requested form(s). You can download them below."
-        if not (data.get("answer_md") or "").strip():
-            data["answer_md"] = "**I found the requested form(s).**\n\nYou can download them below."
+
+    if not (data.get("answer_md") or "").strip():
+        data["answer_md"] = repair_markdown_from_text(str(data.get("answer", "") or ""))
 
 
 # =========================
@@ -1853,17 +1940,18 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     data["answer"] = remove_question_sentences(str(data.get("answer", "")))
     data["answer_md"] = remove_question_lines_md(str(data.get("answer_md", "")))
 
-    # Add a gentle closing only to shorter informational replies; long answers and download replies already feel complete.
+    # Add a dynamic closing only to shorter informational replies; long answers and download replies already feel complete.
     answer_text = str(data.get("answer", "") or "")
     has_downloads = bool(data.get("downloads"))
     if data.get("intent") != "unrelated" and not data.get("suppress_help_closing") and not has_downloads:
         if not has_help_closing(answer_text) and not has_help_closing(data.get("answer_md", "")):
-            if _HELP_CLOSINGS and len(answer_text) <= 220 and random.random() < 0.35:
-                closing = random.choice(_HELP_CLOSINGS)
-                if closing not in data["answer"]:
+            if len(answer_text) <= 220 and random.random() < 0.35:
+                closing = _build_dynamic_closing(user_query, answer_text, str(data.get("intent", "")))
+                if closing and closing not in data["answer"]:
                     data["answer"] = (data["answer"] + " " + closing).strip() if data["answer"] else closing
-                if closing not in data["answer_md"]:
+                if closing and closing not in data["answer_md"]:
                     data["answer_md"] = (data["answer_md"] + f"\n\n{closing}").strip() if data["answer_md"] else closing
+
 
 
     return data
@@ -1966,6 +2054,158 @@ prompt = ChatPromptTemplate.from_messages(
 ).partial(format_instructions=parser.get_format_instructions())
 
 
+CLOSING_SYSTEM_TEMPLATE = """
+You write one short closing sentence for the Bhutan Insurance Limited (BIL) website chatbot.
+
+Write exactly one sentence that:
+- sounds natural and varied, not canned
+- fits the user's topic and the answer that was just given
+- stays within 8-18 words
+- offers further help only for relevant BIL topics
+- does not repeat the wording already used in the answer
+- uses no markdown, no bullets, no links, and no question mark
+- does not mention anything outside BIL services
+"""
+
+closing_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", CLOSING_SYSTEM_TEMPLATE),
+        (
+            "human",
+            """USER QUERY:
+{query}
+
+INTENT:
+{intent}
+
+ANSWER SO FAR:
+{answer}
+
+STYLE GUIDANCE:
+{style_hint}
+""",
+        ),
+    ]
+)
+
+
+FORM_GUIDE_SYSTEM_TEMPLATE = """
+You write the chat reply that accompanies downloadable Bhutan Insurance Limited (BIL) forms.
+
+Write concise markdown for a chat UI.
+Choose the most relevant format based on the attached form or forms and the supplied context instead of using one fixed template.
+
+Guidelines:
+- start with a short confirmation that the form or forms are attached below
+- use a compact structure that fits the form, such as short sections, bullets, or a brief checklist
+- explain what the form is for when that is clear from the context
+- include the most useful things the user should know before filling it, but only when supported by the context
+- if multiple forms are attached, explain how they differ or work together when that is clear
+- labels like `**What it's for**`, `**Before you fill it**`, or `**How they work together**` are optional, not required
+- keep it concise and easy to scan
+- do not use markdown headings with `#`
+- do not use links and do not end with a question
+- do not invent fields, documents, or steps that are not supported by the context
+"""
+
+form_guide_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", FORM_GUIDE_SYSTEM_TEMPLATE),
+        (
+            "human",
+            """USER QUERY:
+{query}
+
+RECENT CHAT CONTEXT:
+{history_context}
+
+ACTIVE BIL TOPIC:
+{topic}
+
+FORMS ATTACHED:
+{form_titles}
+
+FORM CONTEXT:
+{context}
+""",
+        ),
+    ]
+)
+
+
+GREETING_SYSTEM_TEMPLATE = """
+You write the greeting reply for Norbu, the AI assistant for Bhutan Insurance Limited (BIL).
+
+Write a short reply that:
+- greets the user naturally
+- makes it clear you can help with BIL topics like insurance, claims, loans, forms, contact details, branches, and annual reports
+- may lightly mention continuing a recent BIL topic if one is provided
+- sounds warm but not overly enthusiastic or canned
+- stays within 1-2 short sentences
+- uses no bullets, no markdown headings, no links, and no question at the end
+"""
+
+greeting_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", GREETING_SYSTEM_TEMPLATE),
+        (
+            "human",
+            """USER QUERY:
+{query}
+
+RECENT CHAT CONTEXT:
+{history_context}
+
+RECENT BIL TOPIC:
+{recent_topic}
+
+STYLE GUIDANCE:
+{style_hint}
+""",
+        ),
+    ]
+)
+
+
+UNRELATED_SYSTEM_TEMPLATE = """
+You are the official website chatbot for Bhutan Insurance Limited (BIL).
+
+The user's latest message is outside the scope of BIL support.
+
+Write a short reply that:
+- acknowledges what the user is asking about in the first sentence
+- clearly says you cannot help with that specific topic here
+- does NOT answer the unrelated question itself
+- naturally redirects to the BIL topics you can help with: insurance products, claims, loans, forms, contact details, branches, and annual reports
+- if a recent BIL topic is provided, you may mention it as something you can continue helping with
+- sounds natural and varied, not canned
+- stays within 2-3 sentences
+- uses no bullets, no markdown headings, no links, and no question at the end
+"""
+
+unrelated_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", UNRELATED_SYSTEM_TEMPLATE),
+        (
+            "human",
+            """USER QUERY:
+{query}
+
+RECENT CHAT CONTEXT:
+{history_context}
+
+RECENT BIL TOPIC:
+{recent_topic}
+
+STYLE GUIDANCE:
+{style_hint}
+""",
+        ),
+    ]
+)
+
+
+
 def _llm() -> ChatOpenAI:
     kwargs = {
         "model": settings.chat_model,
@@ -1976,6 +2216,205 @@ def _llm() -> ChatOpenAI:
     if not str(settings.chat_model).startswith("gpt-5"):
         kwargs["temperature"] = 0.35
     return ChatOpenAI(**kwargs)
+
+
+def _llm_plain() -> ChatOpenAI:
+    kwargs = {
+        "model": settings.chat_model,
+        "api_key": settings.openai_api_key,
+    }
+    if not str(settings.chat_model).startswith("gpt-5"):
+        kwargs["temperature"] = 0.55
+    return ChatOpenAI(**kwargs)
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                if item.strip():
+                    parts.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                piece = item.get("text") or item.get("content") or ""
+                if isinstance(piece, str) and piece.strip():
+                    parts.append(piece.strip())
+                continue
+            piece = getattr(item, "text", None) or getattr(item, "content", None)
+            if isinstance(piece, str) and piece.strip():
+                parts.append(piece.strip())
+        return " ".join(parts).strip()
+    return str(content or "").strip()
+
+
+def _build_unrelated_llm_reply(query: str, history: List[Dict[str, str]]) -> str:
+    recent_topic = last_active_topic(history) if has_recent_bil_context(history) else ""
+    style_hint = random.choice(_UNRELATED_STYLE_HINTS)
+    try:
+        llm = _llm_plain()
+        msgs = unrelated_prompt.format_messages(
+            query=query,
+            history_context=build_recent_history_context(history),
+            recent_topic=recent_topic or "None",
+            style_hint=style_hint,
+        )
+        out = llm.invoke(msgs)
+        text = _message_content_to_text(getattr(out, "content", ""))
+        text = strip_urls(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text and not text.startswith("{"):
+            return text
+    except Exception:
+        pass
+    return bil_unrelated_reply.run(query) if hasattr(bil_unrelated_reply, "run") else bil_unrelated_reply(query)
+
+
+
+def _build_greeting_llm_reply(query: str, history: List[Dict[str, str]]) -> str:
+    recent_topic = last_active_topic(history) if has_recent_bil_context(history) else ""
+    style_hint = random.choice(_GREETING_STYLE_HINTS)
+    try:
+        llm = _llm_plain()
+        msgs = greeting_prompt.format_messages(
+            query=query,
+            history_context=build_recent_history_context(history),
+            recent_topic=recent_topic or "None",
+            style_hint=style_hint,
+        )
+        out = llm.invoke(msgs)
+        text = _message_content_to_text(getattr(out, "content", ""))
+        text = strip_urls(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"[?]+$", "", text).strip()
+        if text and not text.startswith("{"):
+            return text
+    except Exception:
+        pass
+    if recent_topic:
+        return f"Hello. I can help with BIL topics, including continuing with {recent_topic}."
+    return "Hello. I can help with BIL insurance, claims, loans, forms, contact details, branches, and annual reports."
+
+
+
+def build_start_greeting(history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+    history = list(history or [])
+    greeting = _build_greeting_llm_reply("hello", history)
+    return finalize(
+        {
+            "intent": "unrelated",
+            "answer": greeting,
+            "answer_md": repair_markdown_from_text(greeting),
+            "downloads": [],
+            "sources": [],
+            "confidence": "high",
+            "client_delay_ms": 1200,
+        },
+        user_query="hello",
+    )
+
+
+
+def _build_dynamic_closing(query: str, answer: str, intent: str) -> str:
+    style_hint = random.choice(_CLOSING_STYLE_HINTS)
+    try:
+        llm = _llm_plain()
+        msgs = closing_prompt.format_messages(
+            query=query,
+            intent=intent or "bil_query",
+            answer=answer,
+            style_hint=style_hint,
+        )
+        out = llm.invoke(msgs)
+        text = _message_content_to_text(getattr(out, "content", ""))
+        text = strip_urls(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"[?!.]+$", "", text).strip()
+        if text and len(text.split()) >= 4:
+            return f"{text}."
+    except Exception:
+        pass
+    return random.choice(_HELP_CLOSINGS)
+
+
+def _fallback_form_download_reply(downloads: List[Dict[str, str]]) -> Dict[str, str]:
+    titles = [
+        (d.get("title") or "Form").strip()
+        for d in downloads[:4]
+        if (d.get("title") or "").strip()
+    ]
+    if not titles:
+        md = "I've attached the relevant BIL form below.\n\n**Before you fill it**\n- Review the requested details in the form before submission."
+        return {"answer": markdown_to_plain_text(md), "answer_md": md}
+
+    if len(titles) == 1:
+        title = titles[0]
+        md = (
+            f"I've attached the relevant form below.\n\n"
+            f"**What it's for**\n"
+            f"- {title}\n\n"
+            f"**Before you fill it**\n"
+            f"- Review the required fields carefully and complete them accurately.\n"
+            f"- Keep the supporting details for your BIL request ready before submission."
+        )
+        return {"answer": markdown_to_plain_text(md), "answer_md": md}
+
+    md = (
+        "I've attached the relevant forms below.\n\n"
+        "**What they're for**\n"
+        + "\n".join(f"- {title}" for title in titles[:4])
+        + "\n\n**Before you fill them**\n"
+        "- Review each form carefully and complete the sections that apply to your request.\n"
+        "- Keep the related policy, identity, or product details ready before submission."
+    )
+    if any("intimation" in title.lower() for title in titles) and any("claim" in title.lower() for title in titles):
+        md += "\n\n**How they work together**\n- Use the intimation form to notify BIL first, then complete the detailed claim form."
+    return {"answer": markdown_to_plain_text(md), "answer_md": md}
+
+
+def _build_form_download_reply(query: str, history: List[Dict[str, str]], downloads: List[Dict[str, str]]) -> Dict[str, str]:
+    topic = last_active_topic(history)
+    form_titles = ", ".join(
+        (d.get("title") or "Form").strip()
+        for d in downloads[:4]
+        if (d.get("title") or "").strip()
+    )
+    try:
+        context_obj = bil_get_form_context(query, downloads[:4], topic)
+    except Exception:
+        context_obj = {"contexts": [], "found": False}
+
+    contexts = context_obj.get("contexts", []) or []
+    if contexts:
+        context_text = "\n\n".join(
+            f"TITLE: {c.get('title', '')}\nSOURCE: {c.get('source', '')}\nCONTENT: {c.get('content', '')}"
+            for c in contexts[:4]
+        )
+    else:
+        context_text = "Only the form titles are available. Stay general and do not invent details."
+
+    try:
+        llm = _llm_plain()
+        msgs = form_guide_prompt.format_messages(
+            query=query,
+            history_context=build_recent_history_context(history),
+            topic=topic or "None",
+            form_titles=form_titles or "BIL form",
+            context=context_text,
+        )
+        out = llm.invoke(msgs)
+        md = _message_content_to_text(getattr(out, "content", ""))
+        md = normalize_form_markdown(md)
+        if md and not md.startswith("{") and looks_like_markdown(md):
+            answer = markdown_to_plain_text(md)
+            if answer:
+                return {"answer": answer, "answer_md": md}
+    except Exception:
+        pass
+
+    return _fallback_form_download_reply(downloads)
 
 
 # =========================
@@ -1996,10 +2435,11 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
     # 0) Social intent
     social = detect_social_intent(raw_q)
     if social == "greeting":
+        greeting = _build_greeting_llm_reply(raw_q, history)
         return finalize({
             "intent": "unrelated",
-            "answer": "Hello! I can help with BIL insurance, claims, loans, and forms.",
-            "answer_md": "**Hello!**\n\nI can help with BIL insurance, claims, loans, and forms.",
+            "answer": greeting,
+            "answer_md": repair_markdown_from_text(greeting),
             "downloads": [],
             "sources": [],
             "confidence": "high",
@@ -2022,6 +2462,18 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "intent": "unrelated",
             "answer": "Goodbye! Have a great day.",
             "answer_md": "Goodbye!\n\nHave a great day.",
+            "downloads": [],
+            "sources": [],
+            "confidence": "high",
+            "client_delay_ms": 1500,
+        }, user_query=raw_q)
+
+    if social == "identity":
+        answer, answer_md = build_identity_reply(raw_q)
+        return finalize({
+            "intent": "unrelated",
+            "answer": answer,
+            "answer_md": answer_md,
             "downloads": [],
             "sources": [],
             "confidence": "high",
@@ -2095,11 +2547,13 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             if filtered:
                 merged = filtered
 
+            downloads = merged[:4]
+            form_reply = _build_form_download_reply(q, history, downloads)
             return finalize({
                 "intent": "form_request",
-                "answer": "I found the requested form(s). You can download them below.",
-                "answer_md": "**I found the requested form(s).**\n\nYou can download them below.",
-                "downloads": merged[:4],
+                "answer": str(form_reply.get("answer", "") or ""),
+                "answer_md": str(form_reply.get("answer_md", "") or ""),
+                "downloads": downloads,
                 "sources": [],
                 "confidence": "high",
             }, user_query=q)
@@ -2161,7 +2615,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
 
     # 3) Unrelated
     if hint == "unrelated":
-        msg = bil_unrelated_reply.run(q) if hasattr(bil_unrelated_reply, "run") else bil_unrelated_reply(q)
+        msg = _build_unrelated_llm_reply(q, history)
         return finalize({
             "intent": "unrelated",
             "answer": msg,

@@ -4,8 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict, deque
 from pathlib import Path
 
-from app.schemas import ChatRequest, BotResponse, DownloadItem, TranscribeResponse
-from app.agent import run_agent
+from app.schemas import ChatRequest, GreetingRequest, BotResponse, DownloadItem, GreetingResponse, TranscribeResponse
+from app.agent import build_start_greeting, run_agent
 from app.incremental import start_incremental_loop
 from openai import OpenAI
 import tempfile
@@ -120,17 +120,17 @@ def _startup_tasks():
 def health():
     return {"ok": True}
 
-@app.post("/chat", response_model=BotResponse)
-def chat(req: ChatRequest):
 
-    sid = req.session_id or "anon"
+def _merge_session_history(session_id: str, req_history, persist: bool = True):
+    sid = session_id or "anon"
     history = list(SESSION_HISTORY[sid])
 
-    if req.history:
-        client_history = [{"role": m.role, "content": m.content} for m in req.history[-8:]]
+    if req_history:
+        client_history = [{"role": m.role, "content": m.content} for m in req_history[-8:]]
         if not history:
             history = client_history
-            SESSION_HISTORY[sid].extend(client_history)
+            if persist:
+                SESSION_HISTORY[sid].extend(client_history)
         else:
             merged = list(history)
             seen = {(str(m.get("role", "")), str(m.get("content", ""))) for m in merged}
@@ -141,8 +141,28 @@ def chat(req: ChatRequest):
                 merged.append(item)
                 seen.add(key)
             history = merged[-12:]
-            SESSION_HISTORY[sid].clear()
-            SESSION_HISTORY[sid].extend(history)
+            if persist:
+                SESSION_HISTORY[sid].clear()
+                SESSION_HISTORY[sid].extend(history)
+
+    return sid, history
+
+
+@app.post("/greeting", response_model=GreetingResponse)
+def greeting(req: GreetingRequest):
+    _, history = _merge_session_history(req.session_id or "anon", req.history, persist=False)
+    result = build_start_greeting(history=history)
+    return GreetingResponse(
+        answer=result.get("answer", ""),
+        answer_md=result.get("answer_md", ""),
+        client_delay_ms=result.get("client_delay_ms"),
+    )
+
+
+@app.post("/chat", response_model=BotResponse)
+def chat(req: ChatRequest):
+
+    sid, history = _merge_session_history(req.session_id or "anon", req.history, persist=True)
 
     result = run_agent(query=req.message, history=history)
 

@@ -94,6 +94,38 @@ def _load_documents() -> List[Dict[str, Any]]:
 
     return list(out.values())
 
+
+def _load_raw_records() -> List[Dict[str, Any]]:
+    if not RAW_PATH.exists():
+        return []
+
+    out: List[Dict[str, Any]] = []
+    with RAW_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            source = (obj.get("source") or "").strip()
+            text = clean_text((obj.get("text") or "").strip())
+            if not source or not text:
+                continue
+
+            out.append(
+                {
+                    "type": (obj.get("type") or "").strip().lower(),
+                    "title": (obj.get("title") or _title_from_url(source)).strip() or _title_from_url(source),
+                    "source": source,
+                    "text": text,
+                }
+            )
+
+    return out
+
 def _score_form(query: str, form: Dict[str, Any]) -> float:
     """Score a form by overlap of meaningful tokens + small bonus for filename/url matches."""
     q_tokens = set(_tokenize(query))
@@ -159,6 +191,7 @@ def _best_matches(query: str, forms: List[Dict[str, Any]], top_k: int = TOP_K) -
 _vectorstore = None
 _forms = None
 _docs = None
+_raw_records = None
 _annual_reports = None
 _resource_lock = threading.RLock()
 
@@ -288,11 +321,12 @@ def init_resources():
 
 def refresh_vectorstore() -> None:
     """Reload vectorstore + forms safely after incremental indexing."""
-    global _vectorstore, _forms, _docs, _annual_reports
+    global _vectorstore, _forms, _docs, _raw_records, _annual_reports
     with _resource_lock:
         _vectorstore = load_vectorstore()
         _forms = _load_forms()
         _docs = _load_documents()
+        _raw_records = _load_raw_records()
         _annual_reports = None
 
 @tool
@@ -321,6 +355,107 @@ def bil_get_forms(query: str) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def _trim_form_context(text: str, limit: int = 2200) -> str:
+    cleaned = clean_text(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "..."
+
+
+def _norm_match_key(text: str) -> str:
+    text = unquote((text or "").lower())
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def bil_get_form_context(query: str, matches: List[Dict[str, str]], topic: str = "") -> Dict[str, Any]:
+    if not matches:
+        return {"contexts": [], "found": False}
+
+    global _raw_records
+    with _resource_lock:
+        if _raw_records is None:
+            _raw_records = _load_raw_records()
+        records = list(_raw_records or [])
+
+    contexts: List[Dict[str, str]] = []
+    seen_sources = set()
+    form_specs: List[Dict[str, Any]] = []
+
+    for match in matches[:4]:
+        title = (match.get("title") or _title_from_url(match.get("url", ""))).strip()
+        url = (match.get("url") or "").strip()
+        title_key = _norm_match_key(title)
+        url_key = _norm_match_key(url)
+        base_key = _norm_match_key(url.split("?")[0].split("/")[-1]) if url else ""
+        form_specs.append(
+            {
+                "title": title,
+                "title_key": title_key,
+                "tokens": set(_tokenize(f"{title} {_title_from_url(url)}")),
+            }
+        )
+
+        exact = None
+        for rec in records:
+            src = (rec.get("source") or "").strip()
+            if not src:
+                continue
+            src_key = _norm_match_key(src)
+            src_base = _norm_match_key(src.split("?")[0].split("/")[-1])
+            if url and (src_key == url_key or (base_key and src_base == base_key)):
+                exact = rec
+                break
+
+        if exact and exact.get("source") not in seen_sources:
+            contexts.append(
+                {
+                    "title": (exact.get("title") or title).strip() or title,
+                    "source": exact.get("source", ""),
+                    "content": _trim_form_context(exact.get("text", "")),
+                }
+            )
+            seen_sources.add(exact.get("source", ""))
+
+    topic_tokens = set(_tokenize(f"{query} {topic}"))
+    page_candidates: List[Tuple[int, Dict[str, Any]]] = []
+    for rec in records:
+        if rec.get("type") != "page":
+            continue
+        source = rec.get("source", "")
+        if not source or source in seen_sources:
+            continue
+
+        hay = unquote(
+            f"{rec.get('title', '')} {source} {(rec.get('text', '') or '')[:3200]}"
+        ).lower()
+        score = 0
+        for spec in form_specs:
+            if spec["title_key"] and spec["title_key"] in _norm_match_key(hay):
+                score += 5
+            score += sum(1 for tok in spec["tokens"] if tok in hay)
+        if topic_tokens:
+            score += 2 * sum(1 for tok in topic_tokens if tok in hay)
+        if score > 0:
+            page_candidates.append((score, rec))
+
+    page_candidates.sort(key=lambda item: item[0], reverse=True)
+    for _, rec in page_candidates[:2]:
+        source = rec.get("source", "")
+        if not source or source in seen_sources:
+            continue
+        contexts.append(
+            {
+                "title": (rec.get("title") or _title_from_url(source)).strip(),
+                "source": source,
+                "content": _trim_form_context(rec.get("text", "")),
+            }
+        )
+        seen_sources.add(source)
+
+    return {"contexts": contexts[:6], "found": bool(contexts)}
 
 def _score_document(query: str, doc: Dict[str, Any]) -> float:
     q_tokens = set(_tokenize(query))
@@ -899,19 +1034,107 @@ def bil_extract_financial_fact(query: str) -> str:
 
 
 
+_UNRELATED_STOPWORDS = {
+    "a", "an", "the", "about", "for", "of", "to", "me", "please", "kindly", "some", "any",
+    "can", "could", "would", "will", "you", "tell", "show", "give", "explain", "describe", "find",
+    "what", "which", "who", "when", "where", "why", "how", "is", "are", "was", "were", "do",
+    "does", "did", "i", "we", "my", "our", "on", "in", "at", "from", "with", "need", "want",
+}
+_UNRELATED_PREFIX_RE = re.compile(
+    r"^(?:can you|could you|would you|will you|please|tell me about|tell me|explain|describe|show me|give me|"
+    r"what is|what are|who is|who are|where is|where are|when is|when are|how do i|how to|write|create|build)\s+",
+    re.IGNORECASE,
+)
+_UNRELATED_CATEGORY_KEYWORDS = {
+    "weather": {"weather", "forecast", "temperature", "rain", "snow", "storm", "climate"},
+    "coding": {"code", "coding", "program", "programming", "python", "javascript", "java", "react", "php", "sql", "bug"},
+    "news": {"news", "latest", "headline", "election", "president", "minister", "war", "today"},
+    "shopping": {"buy", "price", "cost", "cheap", "shop", "shopping", "phone", "laptop", "camera"},
+    "travel": {"flight", "hotel", "visa", "trip", "travel", "tour", "tourism", "destination"},
+    "education": {"school", "college", "university", "exam", "study", "homework", "assignment"},
+    "entertainment": {"movie", "song", "music", "actor", "celebrity", "game", "sports", "match"},
+}
+_UNRELATED_ACK_TEMPLATES = {
+    "generic": [
+        "I can see you're asking about {subject}, but I can't help with that here.",
+        "You're asking about {subject}. That sits outside what this chatbot covers.",
+        "I understand you're asking about {subject}, but that's outside my scope here.",
+    ],
+    "weather": [
+        "I can see you're asking about {subject}, but I can't help with weather here.",
+        "You're asking about {subject}. I don't handle weather or forecasts in this chatbot.",
+    ],
+    "coding": [
+        "I can see you're asking about {subject}, but I can't help with coding or software issues here.",
+        "You're asking about {subject}. This chatbot does not handle programming or technical troubleshooting.",
+    ],
+    "news": [
+        "I can see you're asking about {subject}, but I don't cover general news or current affairs here.",
+        "You're asking about {subject}. News and public-affairs questions are outside this chatbot's scope.",
+    ],
+    "shopping": [
+        "I can see you're asking about {subject}, but I can't help with shopping or product recommendations here.",
+        "You're asking about {subject}. Buying advice and product searches are outside what this chatbot covers.",
+    ],
+    "travel": [
+        "I can see you're asking about {subject}, but I can't help with general travel planning here.",
+        "You're asking about {subject}. General travel questions are outside this chatbot's scope.",
+    ],
+    "education": [
+        "I can see you're asking about {subject}, but I can't help with study or academic questions here.",
+        "You're asking about {subject}. Academic questions are outside what this chatbot covers.",
+    ],
+    "entertainment": [
+        "I can see you're asking about {subject}, but I don't cover entertainment topics here.",
+        "You're asking about {subject}. Entertainment and leisure topics are outside this chatbot's scope.",
+    ],
+}
+_UNRELATED_REDIRECTS = [
+    "I can help with BIL insurance products, claims, loans, forms, contact details, and annual reports.",
+    "I can help with Bhutan Insurance Limited services like insurance, claims, loans, forms, branches, contacts, and reports.",
+    "I can help with BIL policy information, claim processes, loan products, forms, contacts, and annual-report details.",
+]
+
+
+def _extract_unrelated_subject(query: str) -> str:
+    q = (query or "").strip()
+    if not q:
+        return "that"
+    q = _UNRELATED_PREFIX_RE.sub("", q)
+    q = re.sub(r"[?!.]+$", "", q)
+    q = re.sub(r"\s+", " ", q).strip().lower()
+    if not q:
+        return "that"
+
+    words = re.findall(r"[a-z0-9']+", q)
+    while words and words[0] in _UNRELATED_STOPWORDS:
+        words.pop(0)
+    subject = " ".join(words[:7]).strip()
+    if not subject:
+        return "that"
+    return subject
+
+
+def _categorize_unrelated_query(query: str) -> str:
+    q = (query or "").lower()
+    for category, keywords in _UNRELATED_CATEGORY_KEYWORDS.items():
+        if any(re.search(rf"\b{re.escape(word)}\b", q) for word in keywords):
+            return category
+    return "generic"
+
+
 @tool
 def bil_unrelated_reply(user_query: str) -> str:
     """
     Use when the user query is unrelated to Bhutan Insurance Limited (BIL).
-    Returns a short redirection message.
+    Returns a short redirection message that acknowledges the user's topic.
     """
-    options = [
-        "Sorry, I can’t help with that. I can help with BIL services like insurance, claims, loans, contact info, and forms.",
-        "I’m not able to answer that, but I can help with Bhutan Insurance Limited (BIL) services such as insurance, claims, loans, and forms.",
-        "I'm only able to help with BIL services and products like insurance, claims, loans, contacts, and forms.",
-        "I don’t have information on that topic. If you need BIL support, I can help with insurance, claims, loans, and forms.",
-    ]
-    return random.choice(options)
+    subject = _extract_unrelated_subject(user_query)
+    category = _categorize_unrelated_query(user_query)
+    ack_options = _UNRELATED_ACK_TEMPLATES.get(category) or _UNRELATED_ACK_TEMPLATES["generic"]
+    ack = random.choice(ack_options).format(subject=subject)
+    redirect = random.choice(_UNRELATED_REDIRECTS)
+    return f"{ack} {redirect}"
 
 @tool
 def bil_intent_hint(query: str) -> str:

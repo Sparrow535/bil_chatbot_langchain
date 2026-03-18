@@ -367,14 +367,9 @@ select {
   gap: 6px;
   max-width: 78%;
 }
-.msg-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #111827;
-  margin-left: 2px;
-}
 
 .bubble {
+  position: relative;
   max-width: 78%;
   padding: 11px 13px;
   border-radius: 16px;
@@ -389,15 +384,39 @@ select {
 .incoming .bubble {
   background: var(--incoming);
   color: #111827;
-  border-top-left-radius: 10px;
+  border-top-left-radius: 12px;
   max-width: 100%;
+}
+
+.incoming .bubble::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  left: -7px;
+  width: 14px;
+  height: 16px;
+  background: var(--incoming);
+  clip-path: polygon(100% 0, 100% 100%, 0 48%);
+  border-bottom-right-radius: 10px;
 }
 
 .outgoing .bubble {
   background: var(--outgoing);
   color: var(--outgoingText);
-  border-bottom-right-radius: 5px;
+  border-bottom-right-radius: 10px;
   max-width: 100%;
+}
+
+.outgoing .bubble::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  right: -7px;
+  width: 14px;
+  height: 16px;
+  background: var(--outgoing);
+  clip-path: polygon(0 0, 100% 48%, 0 100%);
+  border-bottom-left-radius: 10px;
 }
 
 .chat-composer {
@@ -965,7 +984,7 @@ select {
     --chat-panel-width: min(440px, calc(100vw - 32px));
   }
   .chat-teaser {
-    width: min(300px, calc(100vw - (var(--chat-edge-gap) * 2)));
+    width: min(300px, calc(80vw - (var(--chat-edge-gap) * 2)));
   }
   .bubble {
     font-size: 13px;
@@ -976,7 +995,7 @@ select {
   #chat-widget {
     --chat-edge-gap: 14px;
     --chat-fab-size: 62px;
-    --chat-panel-width: min(430px, calc(100vw - 28px));
+    --chat-panel-width: min(430px, calc(80vw - 28px));
   }
   #chat-panel {
     height: min(600px, 76vh, var(--chat-panel-max-height));
@@ -1075,9 +1094,6 @@ select {
     width: 24px;
     height: 24px;
     flex: 0 0 24px;
-  }
-  .msg-title {
-    font-size: 11.5px;
   }
   .chat-composer {
     padding: 8px;

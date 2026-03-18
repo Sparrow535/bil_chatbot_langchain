@@ -10,6 +10,10 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     history: List[ChatMessage] = Field(default_factory=list)
 
+class GreetingRequest(BaseModel):
+    session_id: Optional[str] = None
+    history: List[ChatMessage] = Field(default_factory=list)
+
 class DownloadItem(BaseModel):
     title: str
     url: str
@@ -22,6 +26,11 @@ class BotResponse(BaseModel):
     downloads: List[DownloadItem] = Field(default_factory=list)
     confidence: Literal["low", "medium", "high"] = "low"
     debug: Optional[Dict[str, Any]] = None
+    client_delay_ms: Optional[int] = None
+
+class GreetingResponse(BaseModel):
+    answer: str
+    answer_md: str = ""
     client_delay_ms: Optional[int] = None
 
 class TranscribeResponse(BaseModel):
