@@ -631,7 +631,8 @@
   async function sendMessage(messageOverride = "") {
     if (isAssistantBusy || sttInFlight) return;
 
-    const text = String(messageOverride || inputEl.value || "").trim();
+    const overrideText = typeof messageOverride === "string" ? messageOverride : "";
+    const text = String(overrideText || inputEl.value || "").trim();
     if (!text) return;
 
     if (composerNormal && composerNormal.classList.contains("hinting")) {
@@ -642,7 +643,7 @@
     addTextMessage(text, "outgoing");
     history.push({ role: "user", content: text });
 
-    if (!messageOverride) {
+    if (!overrideText) {
       inputEl.value = "";
     }
 
@@ -694,7 +695,7 @@
     }
   }
 
-  sendBtn.addEventListener("click", sendMessage);
+  sendBtn.addEventListener("click", () => sendMessage());
   inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") sendMessage();
   });
