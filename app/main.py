@@ -126,16 +126,33 @@ def _merge_session_history(session_id: str, req_history, persist: bool = True):
     history = list(SESSION_HISTORY[sid])
 
     if req_history:
-        client_history = [{"role": m.role, "content": m.content} for m in req_history[-8:]]
+        client_history = []
+        for m in req_history[-8:]:
+            item = {"role": m.role, "content": m.content}
+            followup_query = (m.followup_query or "").strip() if hasattr(m, "followup_query") else ""
+            if followup_query:
+                item["followup_query"] = followup_query
+            client_history.append(item)
         if not history:
             history = client_history
             if persist:
                 SESSION_HISTORY[sid].extend(client_history)
         else:
             merged = list(history)
-            seen = {(str(m.get("role", "")), str(m.get("content", ""))) for m in merged}
+            seen = {
+                (
+                    str(m.get("role", "")),
+                    str(m.get("content", "")),
+                    str(m.get("followup_query", "")),
+                )
+                for m in merged
+            }
             for item in client_history:
-                key = (item["role"], item["content"])
+                key = (
+                    item["role"],
+                    item["content"],
+                    str(item.get("followup_query", "")),
+                )
                 if key in seen:
                     continue
                 merged.append(item)
@@ -168,6 +185,7 @@ def chat(req: ChatRequest):
 
     SESSION_HISTORY[sid].append({"role": "user", "content": req.message})
     assistant_hist = str(result.get("answer", "") or "")
+    assistant_followup_query = str(result.get("followup_query", "") or "").strip()
     raw_downloads = result.get("downloads") or []
     if isinstance(raw_downloads, list) and raw_downloads:
         titles = []
@@ -178,7 +196,10 @@ def chat(req: ChatRequest):
                     titles.append(t)
         if titles:
             assistant_hist = f"{assistant_hist} Downloads: {', '.join(titles[:4])}".strip()
-    SESSION_HISTORY[sid].append({"role": "assistant", "content": assistant_hist})
+    assistant_item = {"role": "assistant", "content": assistant_hist}
+    if assistant_followup_query:
+        assistant_item["followup_query"] = assistant_followup_query
+    SESSION_HISTORY[sid].append(assistant_item)
 
     downloads = []
     for d in (result.get("downloads") or []):
@@ -201,7 +222,8 @@ def chat(req: ChatRequest):
         sources=result.get("sources", []),
         downloads=downloads,
         confidence=result.get("confidence", "low"),
-        debug=debug_payload
+        debug=debug_payload,
+        followup_query=result.get("followup_query") or None,
     )
 
 

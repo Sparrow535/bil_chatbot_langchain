@@ -1,7 +1,8 @@
 import json
 import re
 import random
-from typing import List, Dict, Any, Optional
+from functools import lru_cache
+from typing import List, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
 
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ from app.text_utils import (
     looks_like_form_request,
     looks_like_form_download_request,
     looks_like_document_download_request,
+    normalize_bil_query_text,
 )
 from app.tools import (
     bil_extract_financial_fact,
@@ -43,7 +45,14 @@ class AgentResponse(BaseModel):
     downloads: List[DownloadItem] = Field(default_factory=list)
     confidence: str = Field(description="low | medium | high")
 
+
+class FollowupOffer(BaseModel):
+    question: str = Field(default="")
+    query: str = Field(default="")
+
+
 parser = PydanticOutputParser(pydantic_object=AgentResponse)
+followup_offer_parser = PydanticOutputParser(pydantic_object=FollowupOffer)
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _HELP_CLOSINGS = [
@@ -191,6 +200,13 @@ _IDENTITY_PATTERNS = [
     re.compile(r"^(who am i chatting with|who am i talking to)$", re.IGNORECASE),
     re.compile(r"^(what can you do|how can you help|what do you do)$", re.IGNORECASE),
 ]
+_EASTER_EGG_TRIGGER = "/dev"
+_EASTER_EGG_REPLY = """A rare line to uncover.
+
+**Norbu** was designed and built by **ULTRA** for **Bhutan Insurance Limited**.
+
+Built quietly behind the interface - shaped with care, patience, and precision."""
+
 _TOPIC_PREFIX_RE = re.compile(
     r"^(tell me about|tell me more about|tell me|explain|describe|what is|what are|"
     r"more on|what about|can you tell me about|can you explain|"
@@ -209,13 +225,16 @@ _GENERIC_TOPIC_FOLLOWUPS = {
 }
 
 
+@lru_cache(maxsize=4096)
 def _norm(s: str) -> str:
-    s = (s or "").lower().strip()
+    s = normalize_bil_query_text(s or "")
+    s = s.lower().strip()
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
+@lru_cache(maxsize=2048)
 def _compact_topic(text: str) -> str:
     qn = _norm(text)
     if not qn:
@@ -229,13 +248,14 @@ def _compact_topic(text: str) -> str:
         return ""
     return qn
 
+@lru_cache(maxsize=4096)
 def normalize_query_aliases(text: str) -> str:
-    t = (text or "").strip()
+    t = normalize_bil_query_text((text or "").strip())
     if not t:
         return t
-    # Common ASR typo: PIL -> BIL
-    t = re.sub(r"\bPIL\b", "BIL", t, flags=re.IGNORECASE)
-    # Common shorthand for BIL fund products
+    # Common short typos / ASR variants for the company name.
+    t = re.sub(r"\b(?:PIL|BLI)\b", "BIL", t, flags=re.IGNORECASE)
+    # Common shorthand for BIL fund products.
     t = re.sub(r"\bPF\b", "PPF", t, flags=re.IGNORECASE)
     t = re.sub(r"\bGFM\b", "GFM", t, flags=re.IGNORECASE)
     return t
@@ -259,6 +279,24 @@ def detect_social_intent(q: str) -> Optional[str]:
     if any(p.search(qn) for p in _IDENTITY_PATTERNS):
         return "identity"
     return None
+
+
+def _normalize_secret_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+
+
+def _matches_easter_egg(query: str) -> bool:
+    trigger = _normalize_secret_text(_EASTER_EGG_TRIGGER)
+    if not trigger:
+        return False
+    return _normalize_secret_text(query) == trigger
+
+
+def _build_easter_egg_reply() -> tuple[str, str]:
+    answer = strip_urls(_EASTER_EGG_REPLY).strip()
+    if not answer:
+        answer = "Norbu was created with care for Bhutan Insurance Limited."
+    return answer, repair_markdown_from_text(answer)
 
 
 def build_identity_reply(q: str) -> tuple[str, str]:
@@ -348,6 +386,41 @@ def strip_urls(text: str) -> str:
     text = _URL_RE.sub("", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+_FALSE_DOWNLOAD_CLAIM_RE = re.compile(
+    r"(?i)(downloadable files? are attached below|you can download (?:it|them) below|(?:form|forms|document|documents|file|files) (?:is|are) attached below|attached below)",
+)
+
+
+def _remove_false_download_claims_text(text: str, has_downloads: bool) -> str:
+    if has_downloads:
+        return (text or "").strip()
+    t = (text or "").strip()
+    if not t:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", t)
+    kept = [p.strip() for p in parts if p.strip() and not _FALSE_DOWNLOAD_CLAIM_RE.search(p)]
+    return " ".join(kept).strip()
+
+
+
+def _remove_false_download_claims_md(md: str, has_downloads: bool) -> str:
+    if has_downloads:
+        return (md or "").strip()
+    t = (md or "").strip()
+    if not t:
+        return ""
+    lines = []
+    for raw in t.splitlines():
+        line = raw.strip()
+        if line and _FALSE_DOWNLOAD_CLAIM_RE.search(line):
+            continue
+        lines.append(raw)
+    cleaned = "\n".join(lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
 
 def remove_question_sentences(text: str) -> str:
     t = (text or "").strip()
@@ -471,16 +544,31 @@ def _should_skip_user_topic(text: str) -> bool:
     return False
 
 
-def last_user_topic(history: List[Dict[str, str]]) -> str:
+def _history_cache_key(history: List[Dict[str, str]]) -> Tuple[Tuple[str, str, str], ...]:
+    if not history:
+        return ()
+    return tuple(
+        (
+            str(m.get("role") or "").strip().lower(),
+            str(m.get("content") or "").strip(),
+            str(m.get("followup_query") or "").strip(),
+        )
+        for m in history
+        if isinstance(m, dict)
+    )
+
+
+@lru_cache(maxsize=1024)
+def _last_user_topic_cached(history_key: Tuple[Tuple[str, str, str], ...]) -> str:
     """
     Use the most recent USER turn that still carries topic signal.
     Skip vague follow-ups like "how to file it", "give me the form", or "for 2020?"
     so later continuity can stay anchored to the real product/report topic.
     """
-    for m in reversed(history):
-        if m.get("role") != "user":
+    for role, content, _ in reversed(history_key):
+        if role != "user":
             continue
-        txt = normalize_query_aliases((m.get("content") or "").strip())
+        txt = normalize_query_aliases(content)
         if not txt:
             continue
         form_topic = extract_form_topic(txt)
@@ -493,30 +581,46 @@ def last_user_topic(history: List[Dict[str, str]]) -> str:
             return compact
     return ""
 
-def last_user_message(history: List[Dict[str, str]]) -> str:
-    for m in reversed(history):
-        if m.get("role") != "user":
+
+def last_user_topic(history: List[Dict[str, str]]) -> str:
+    return _last_user_topic_cached(_history_cache_key(history))
+
+
+@lru_cache(maxsize=1024)
+def _last_user_message_cached(history_key: Tuple[Tuple[str, str, str], ...]) -> str:
+    for role, content, _ in reversed(history_key):
+        if role != "user":
             continue
-        txt = normalize_query_aliases((m.get("content") or "").strip())
+        txt = normalize_query_aliases(content)
         if txt:
             return txt
     return ""
+
+
+def last_user_message(history: List[Dict[str, str]]) -> str:
+    return _last_user_message_cached(_history_cache_key(history))
+
+
+@lru_cache(maxsize=1024)
+def _last_assistant_message_cached(history_key: Tuple[Tuple[str, str, str], ...]) -> str:
+    for role, content, _ in reversed(history_key):
+        if role != "assistant":
+            continue
+        if content:
+            return content
+    return ""
+
 
 def last_assistant_message(history: List[Dict[str, str]]) -> str:
-    for m in reversed(history):
-        if m.get("role") != "assistant":
-            continue
-        txt = (m.get("content") or "").strip()
-        if txt:
-            return txt
-    return ""
+    return _last_assistant_message_cached(_history_cache_key(history))
 
 
-def last_assistant_topic(history: List[Dict[str, str]]) -> str:
-    for m in reversed(history):
-        if m.get("role") != "assistant":
+@lru_cache(maxsize=1024)
+def _last_assistant_topic_cached(history_key: Tuple[Tuple[str, str, str], ...]) -> str:
+    for role, content, _ in reversed(history_key):
+        if role != "assistant":
             continue
-        txt = normalize_query_aliases((m.get("content") or "").strip())
+        txt = normalize_query_aliases(content)
         if not txt:
             continue
         topic = _extract_topic_from_history_text(txt)
@@ -525,37 +629,84 @@ def last_assistant_topic(history: List[Dict[str, str]]) -> str:
     return ""
 
 
-def last_active_topic(history: List[Dict[str, str]]) -> str:
-    user_topic = last_user_topic(history)
+def last_assistant_topic(history: List[Dict[str, str]]) -> str:
+    return _last_assistant_topic_cached(_history_cache_key(history))
+
+
+@lru_cache(maxsize=1024)
+def _last_active_topic_cached(history_key: Tuple[Tuple[str, str, str], ...]) -> str:
+    user_topic = _last_user_topic_cached(history_key)
     if user_topic:
         return user_topic
 
-    assistant_topic = last_assistant_topic(history)
+    assistant_topic = _last_assistant_topic_cached(history_key)
     if assistant_topic:
         return assistant_topic
 
-    return last_user_message(history) or last_assistant_message(history)
+    return _last_user_message_cached(history_key) or _last_assistant_message_cached(history_key)
 
-def build_recent_history_context(history: List[Dict[str, str]], max_items: int = 4) -> str:
-    if not history:
+
+def last_active_topic(history: List[Dict[str, str]]) -> str:
+    return _last_active_topic_cached(_history_cache_key(history))
+
+
+@lru_cache(maxsize=1024)
+def _build_recent_history_context_cached(history_key: Tuple[Tuple[str, str, str], ...], max_items: int) -> str:
+    if not history_key:
         return "No recent chat context."
     items = []
-    for m in history[-max_items:]:
-        role = (m.get("role") or "").strip().lower()
+    for role, content, _ in history_key[-max_items:]:
         if role not in {"user", "assistant"}:
             continue
-        content = (m.get("content") or "").strip()
-        content = re.sub(r"\s+", " ", content)
-        if len(content) > 220:
-            content = content[:220].rstrip() + "..."
-        items.append(f"{role}: {content}")
+        compact = re.sub(r"\s+", " ", content)
+        if len(compact) > 220:
+            compact = compact[:220].rstrip() + "..."
+        items.append(f"{role}: {compact}")
     return "\n".join(items) if items else "No recent chat context."
+
+
+def build_recent_history_context(history: List[Dict[str, str]], max_items: int = 4) -> str:
+    return _build_recent_history_context_cached(_history_cache_key(history), max_items)
 
 def is_affirmative_reply(q: str) -> bool:
     qn = _norm(q)
     if not qn:
         return False
     return qn in {"yes", "yeah", "yep", "sure", "ok", "okay", "please", "alright"}
+
+
+_AFFIRMATIVE_FOLLOWUP_RE = re.compile(
+    r"^(?:yes|yeah|yep|sure|ok|okay|alright|please|yes please|sure please|please do|go ahead|continue|do that|sounds good)$",
+    re.IGNORECASE,
+)
+
+
+def _is_affirmative_followup_reply(q: str) -> bool:
+    qn = _norm(q)
+    if not qn:
+        return False
+    return is_affirmative_reply(qn) or bool(_AFFIRMATIVE_FOLLOWUP_RE.match(qn))
+
+
+
+def _last_pending_followup_query(history: List[Dict[str, str]]) -> str:
+    for m in reversed(history):
+        if m.get("role") != "assistant":
+            continue
+        pending = normalize_query_aliases((m.get("followup_query") or "").strip())
+        if pending:
+            return pending
+        break
+    return ""
+
+
+
+def _resolve_affirmative_followup_query(q: str, history: List[Dict[str, str]]) -> str:
+    normalized = normalize_query_aliases(q)
+    if not _is_affirmative_followup_reply(normalized):
+        return normalized
+    pending = _last_pending_followup_query(history)
+    return pending or normalized
 
 
 _FOLLOWUP_FRAGMENT_WORDS = {
@@ -1843,6 +1994,484 @@ def _describe_request_scope(q: str, history: List[Dict[str, str]]) -> str:
     return ""
 
 
+def _humanize_scope_label(text: str) -> str:
+    label = normalize_query_aliases((text or "").strip())
+    label = re.sub(r"\s+", " ", label).strip()
+    if not label:
+        return ""
+    replacements = {
+        "Bil": "BIL",
+        "Ppf": "PPF",
+        "Gf": "GF",
+        "Gfm": "GFM",
+    }
+    words = [replacements.get(word, word) for word in label.split()]
+    return " ".join(words).strip()
+
+
+
+_GENERIC_FOLLOWUP_QUESTION_CUES = {
+    "would you like more details",
+    "would you like more information",
+    "would you like any more information",
+    "anything else",
+    "do you need anything else",
+    "would you like anything else",
+}
+
+_FOLLOWUP_OFFER_PREFIXES = (
+    "would you like",
+    "do you want",
+    "want me to",
+    "should i",
+    "shall i",
+    "are you interested in",
+)
+
+_FOLLOWUP_SCOPE_STOPWORDS = {
+    "a", "an", "and", "at", "bil", "bhutan", "for", "from", "in", "insurance",
+    "limited", "of", "the", "to", "with",
+}
+
+
+
+def _followup_offer_allowed(data: Dict[str, Any]) -> bool:
+    intent = str(data.get("intent", "") or "")
+    if intent not in {"bil_query", "form_request"}:
+        return False
+    if str(data.get("confidence", "") or "").lower() == "low":
+        return False
+    return bool(str(data.get("answer", "") or "").strip() or str(data.get("answer_md", "") or "").strip())
+
+
+
+_FOLLOWUP_QUERY_BAD_PREFIXES = (
+    "provide ",
+    "provide detailed ",
+    "list ",
+    "describe ",
+    "outline ",
+    "summarize ",
+    "share ",
+    "explain ",
+)
+
+
+
+def _answer_signal_flags(answer_text: str) -> set[str]:
+    answer_n = _norm(answer_text)
+    flags = set()
+    if any(term in answer_n for term in ["document", "documents", "required", "requirements"]):
+        flags.add("documents")
+    if any(term in answer_n for term in [
+        "attached below",
+        "download the form",
+        "downloadable files",
+        "form is attached",
+        "forms are attached",
+        "proposal form",
+        "claim form",
+        "before you fill",
+        "how they work together",
+    ]):
+        flags.add("form")
+    if any(term in answer_n for term in ["interest rate", "interest rates", "tenure", "repayment"]):
+        flags.add("rates")
+    if any(term in answer_n for term in ["cover", "coverage", "covers", "covered", "benefit", "benefits"]):
+        flags.add("coverage")
+    if any(term in answer_n for term in ["exclusion", "exclusions"]):
+        flags.add("exclusions")
+    if any(term in answer_n for term in ["eligible", "eligibility", "criteria", "qualify", "qualification"]):
+        flags.add("eligibility")
+    if any(term in answer_n for term in ["step", "steps", "process", "procedure", "how to file", "how to apply"]):
+        flags.add("process")
+    return flags
+
+
+
+def _has_instruction_style_followup_query(query: str) -> bool:
+    qn = _norm(query)
+    return any(qn.startswith(prefix.strip()) for prefix in _FOLLOWUP_QUERY_BAD_PREFIXES)
+
+
+
+def _is_offer_style_followup_question(question: str) -> bool:
+    qn = _norm(question)
+    return any(qn.startswith(prefix) for prefix in _FOLLOWUP_OFFER_PREFIXES)
+
+
+
+def _followup_scope_tokens(scope: str) -> List[str]:
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", _norm(scope))
+        if len(token) > 2 and token not in _FOLLOWUP_SCOPE_STOPWORDS
+    ]
+    return tokens[:6]
+
+
+
+def _history_covered_followup_angles(q: str, history: List[Dict[str, str]], scope: str) -> set[str]:
+    scope_tokens = _followup_scope_tokens(scope)
+    if not scope_tokens:
+        return set()
+
+    covered = set()
+    for m in history[-10:]:
+        if m.get("role") != "assistant":
+            continue
+        combined = f"{m.get('content', '')} {m.get('followup_query', '')}".strip()
+        combined_n = _norm(combined)
+        if not combined_n:
+            continue
+        if not any(re.search(rf"\b{re.escape(token)}\b", combined_n) for token in scope_tokens):
+            continue
+        covered |= _answer_signal_flags(combined)
+        angle = _infer_followup_angle("", str(m.get("followup_query", "") or ""), scope, combined)
+        if angle:
+            covered.add(angle)
+    return covered
+
+
+
+def _infer_followup_angle(question: str, query: str, scope: str, answer_text: str) -> str:
+    prompt_text = _norm(" ".join(part for part in [question, query] if part))
+    answer_n = _norm(answer_text)
+    scope_n = _norm(scope)
+
+    def detect(text: str, allow_summary: bool = False) -> str:
+        if not text:
+            return ""
+        if any(term in text for term in ["form", "forms", "application form", "proposal form"]):
+            return "form"
+        if any(term in text for term in ["eligibility", "eligible", "criteria", "qualify"]):
+            return "eligibility"
+        if any(term in text for term in ["document", "documents", "requirements", "required"]):
+            return "documents"
+        if any(term in text for term in ["interest rate", "interest rates", "tenure", "repayment", "prepayment"]):
+            return "rates"
+        if any(term in text for term in ["coverage limit", "coverage limits"]):
+            return "coverage_limits"
+        if any(term in text for term in ["cover", "coverage", "benefit", "benefits"]):
+            return "coverage"
+        if any(term in text for term in ["exclusion", "exclusions"]):
+            return "exclusions"
+        if any(term in text for term in ["purchase", "buy"]):
+            return "purchase"
+        if any(term in text for term in ["step", "steps", "process", "procedure", "how to apply", "how to file"]):
+            return "process"
+        if allow_summary and any(term in text for term in ["highlight", "highlights", "key figure", "figures", "summary", "details", "more", "next"]):
+            return "report_summary" if "annual report" in scope_n else "summary"
+        return ""
+
+    angle = detect(prompt_text, allow_summary=True)
+    if angle:
+        return angle
+
+    angle = detect(answer_n, allow_summary=True)
+    if angle:
+        return angle
+
+    return ""
+
+
+
+def _build_followup_query_from_angle(angle: str, scope: str, q: str, history: List[Dict[str, str]]) -> str:
+    scope = _humanize_scope_label(scope)
+    scope_n = _norm(scope)
+    if not angle:
+        return ""
+
+    if angle == "eligibility":
+        return f"what are the eligibility criteria for {scope}" if scope else "what are the eligibility criteria"
+
+    if angle == "documents":
+        if scope:
+            return f"what documents are required for {scope}"
+        return "what documents are required"
+
+    if angle == "form":
+        if scope:
+            return f"give me the form for {scope}"
+        return "give me the form"
+
+    if angle == "rates":
+        if scope and scope_n not in {"loan products", "bil loan products"}:
+            return f"what is the interest rate and tenure of {scope}"
+        if "loan" in scope_n or _is_broad_loan_rate_query(q) or _is_broad_loan_overview_query(q):
+            return "what are the interest rates of some of the loans in BIL"
+        return f"what are the key rates or charges for {scope}" if scope else "what are the key rates"
+
+    if angle == "coverage_limits":
+        if scope:
+            return f"what are the coverage limits and benefits of {scope}"
+        return "what are the coverage limits and benefits"
+
+    if angle == "coverage":
+        if scope:
+            return f"what does {scope} cover"
+        return "what does it cover"
+
+    if angle == "exclusions":
+        if scope:
+            return f"what are the exclusions of {scope}"
+        return "what are the exclusions"
+
+    if angle in {"purchase", "process"}:
+        if scope:
+            if _is_claim_context(q, history) or "claim" in scope_n:
+                return f"how do I file {scope}"
+            if "annual report" in scope_n:
+                return f"tell me about {scope}"
+            if any(term in scope_n for term in ["loan", "insurance", "ppf", "gf", "gfm", "form"]):
+                return f"how do I apply for {scope}"
+            return f"how do I proceed with {scope}"
+        return "how do I apply"
+
+    if angle == "report_summary":
+        if scope:
+            return f"tell me about {scope}"
+        return "tell me about the annual report"
+
+    if angle == "summary" and scope:
+        return f"tell me about {scope}"
+
+    return ""
+
+
+
+def _coerce_followup_query(question: str, query: str, q: str, history: List[Dict[str, str]], data: Dict[str, Any]) -> str:
+    raw_query = normalize_query_aliases((query or "").strip())
+    scope = _humanize_scope_label(_describe_request_scope(q, history))
+    angle = _infer_followup_angle(
+        question,
+        raw_query,
+        scope,
+        f"{data.get('answer', '')} {data.get('answer_md', '')}",
+    )
+
+    if raw_query and not _has_instruction_style_followup_query(raw_query):
+        query_tokens = set(_norm(raw_query).split())
+        if not (query_tokens & _TOPIC_PRONOUNS):
+            return raw_query
+
+    return normalize_query_aliases(_build_followup_query_from_angle(angle, scope, q, history))
+
+
+
+def _followup_offer_matches_scope(question: str, query: str, q: str, history: List[Dict[str, str]], data: Dict[str, Any]) -> bool:
+    scope = _humanize_scope_label(_describe_request_scope(q, history))
+    scope_n = _norm(scope)
+    answer_flags = _answer_signal_flags(f"{data.get('answer', '')} {data.get('answer_md', '')}")
+    covered_angles = _history_covered_followup_angles(q, history, scope)
+    angle = _infer_followup_angle(question, query, scope, f"{data.get('answer', '')} {data.get('answer_md', '')}")
+
+    if angle and angle in (covered_angles | answer_flags):
+        return False
+
+    if angle == "eligibility":
+        if "loan" in scope_n or any(term in scope_n for term in ["ppf", "provident", "gratuity", "gf", "gfm"]):
+            return True
+        return "eligibility" in answer_flags
+
+    return True
+
+
+
+def _is_valid_followup_offer(question: str, query: str, current_query: str, has_downloads: bool) -> bool:
+    q_text = re.sub(r"\s+", " ", (question or "").strip())
+    next_query = normalize_query_aliases((query or "").strip())
+    if not q_text or not next_query:
+        return False
+    if _norm(next_query) == _norm(current_query):
+        return False
+    if _has_instruction_style_followup_query(next_query):
+        return False
+    qn = _norm(q_text)
+    if len(qn.split()) < 4:
+        return False
+    if not _is_offer_style_followup_question(q_text):
+        return False
+    if any(cue in qn for cue in _GENERIC_FOLLOWUP_QUESTION_CUES):
+        return False
+    if not has_downloads and any(term in qn for term in ["attached", "download below"]):
+        return False
+    query_tokens = set(_norm(next_query).split())
+    if query_tokens & _TOPIC_PRONOUNS:
+        return False
+    if not any(token in _BIL_TOPIC_TERMS or token in {"documents", "requirements", "coverage", "interest", "rates", "annual", "report", "form", "download", "eligibility"} for token in query_tokens):
+        return False
+    return True
+
+
+
+def _derive_followup_offer_fallback(q: str, history: List[Dict[str, str]], data: Dict[str, Any]) -> tuple[str, str]:
+    if not _followup_offer_allowed(data):
+        return "", ""
+
+    scope = _humanize_scope_label(_describe_request_scope(q, history))
+    scope_n = _norm(scope)
+    answer_flags = _answer_signal_flags(f"{data.get('answer', '')} {data.get('answer_md', '')}")
+    covered_angles = _history_covered_followup_angles(q, history, scope)
+    seen_angles = answer_flags | covered_angles
+
+    intent = str(data.get("intent", "") or "")
+    if intent == "form_request":
+        if "claim" in scope_n:
+            return f"Would you like the filing steps for {scope} as well?", f"how do I file {scope}"
+        if "loan" in scope_n:
+            if "eligibility" not in seen_angles:
+                return f"Would you like the eligibility criteria for {scope} as well?", f"what are the eligibility criteria for {scope}"
+            if "rates" not in seen_angles:
+                return f"Would you like the interest rate and tenure for {scope} as well?", f"what is the interest rate and tenure of {scope}"
+            if "documents" not in seen_angles:
+                return f"Would you like the main documents needed for {scope} as well?", f"what documents are required for {scope}"
+            return f"Would you like the application steps for {scope} as well?", f"how do I apply for {scope}"
+        if any(term in scope_n for term in ["insurance", "travel insurance", "motor insurance", "fire insurance"]):
+            return f"Would you like the key coverage details for {scope} as well?", f"what does {scope} cover"
+        if "annual report" in scope_n:
+            return f"Would you like a quick summary of {scope} as well?", f"tell me about {scope}"
+        if scope:
+            return f"Would you like the key details for {scope} as well?", f"tell me about {scope}"
+        return "", ""
+
+    if looks_like_document_download_request(q):
+        if scope:
+            return f"Would you like a quick summary of {scope} as well?", f"tell me about {scope}"
+        return "Would you like a quick summary of this document as well?", "tell me about this document"
+
+    if "annual report" in scope_n:
+        if any(flag in answer_flags for flag in ["process", "documents"]):
+            return "", ""
+        return f"Would you like the key figures from {scope} as well?", f"tell me about {scope}"
+
+    if _is_broad_loan_overview_query(q):
+        return (
+            "Would you like a quick look at some BIL loan interest rates as well?",
+            "what are the interest rates of some of the loans in BIL",
+        )
+
+    if _is_broad_insurance_overview_query(q):
+        return "Would you like me to go over travel insurance next?", "tell me about travel insurance"
+
+    if _is_broad_claim_overview_query(q):
+        return "Would you like me to go over motor claim next?", "tell me about motor claim"
+
+    if "claim" in scope_n:
+        if "process" in seen_angles and "form" not in seen_angles:
+            return f"Would you like the form for {scope} as well?", f"give me the form for {scope}"
+        if "form" in seen_angles:
+            return f"Would you like the claim steps for {scope} as well?", f"how do I file {scope}"
+        return f"Would you like the filing steps for {scope} as well?", f"how do I file {scope}"
+
+    if "loan" in scope_n:
+        if "eligibility" not in seen_angles:
+            return f"Would you like the eligibility criteria for {scope} as well?", f"what are the eligibility criteria for {scope}"
+        if "documents" not in seen_angles:
+            return f"Would you like the documents needed for {scope} as well?", f"what documents are required for {scope}"
+        if "rates" not in seen_angles:
+            return f"Would you like the interest rate and tenure for {scope} as well?", f"what is the interest rate and tenure of {scope}"
+        if "form" not in seen_angles:
+            return f"Would you like the form for {scope} as well?", f"give me the form for {scope}"
+        return f"Would you like the application steps for {scope} as well?", f"how do I apply for {scope}"
+
+    if any(term in scope_n for term in ["travel insurance", "motor insurance", "fire insurance", "insurance"]):
+        if "travel insurance" in scope_n and "coverage" in answer_flags and "exclusions" in answer_flags:
+            return f"Would you like the coverage limits and benefits for {scope} as well?", f"what are the coverage limits and benefits of {scope}"
+        if "coverage" in seen_angles and "exclusions" not in seen_angles:
+            return f"Would you like the main exclusions for {scope} as well?", f"what are the exclusions of {scope}"
+        if "exclusions" in seen_angles and "coverage" not in seen_angles:
+            return f"Would you like a coverage summary for {scope} as well?", f"what does {scope} cover"
+        if "coverage" not in seen_angles:
+            return f"Would you like the main coverage for {scope} as well?", f"what does {scope} cover"
+        if "form" not in seen_angles:
+            return f"Would you like the form for {scope} as well?", f"give me the form for {scope}"
+        return f"Would you like the main exclusions for {scope} as well?", f"what are the exclusions of {scope}"
+
+    if any(term in scope_n for term in ["ppf", "provident", "gratuity", "gf", "gfm"]):
+        if "form" not in seen_angles:
+            return "Would you like the relevant PPF or GF form as well?", "give me the form for PPF"
+        return "Would you like the main requirements for PPF or GF next?", "what documents are required for PPF"
+
+    if scope:
+        return f"Would you like a quick follow-up on {scope} as well?", f"tell me about {scope}"
+
+    return "", ""
+
+
+
+def _build_followup_offer_llm(q: str, history: List[Dict[str, str]], data: Dict[str, Any]) -> tuple[str, str]:
+    if not _followup_offer_allowed(data):
+        return "", ""
+
+    scope = _humanize_scope_label(_describe_request_scope(q, history)) or "None"
+    downloads = data.get("downloads") or []
+    download_titles = ", ".join(
+        (d.get("title") or "").strip()
+        for d in downloads[:4]
+        if isinstance(d, dict) and (d.get("title") or "").strip()
+    ) or "None"
+
+    try:
+        llm = _llm_plain()
+        msgs = followup_offer_prompt.format_messages(
+            query=q,
+            intent=str(data.get("intent", "") or "bil_query"),
+            answer=str(data.get("answer_md") or data.get("answer") or "")[:2200],
+            history_context=build_recent_history_context(history),
+            scope=scope,
+            downloads=download_titles,
+        )
+        out = llm.invoke(msgs)
+        raw = _message_content_to_text(getattr(out, "content", ""))
+        candidate = extract_first_json_object(raw) or raw
+        offer = followup_offer_parser.parse(candidate)
+        question = str(offer.question or "").strip()
+        query_text = _coerce_followup_query(str(offer.question or "").strip(), str(offer.query or "").strip(), q, history, data)
+        if _is_valid_followup_offer(question, query_text, q, bool(downloads)) and _followup_offer_matches_scope(question, query_text, q, history, data):
+            return question, normalize_query_aliases(query_text)
+    except Exception:
+        pass
+    return "", ""
+
+
+
+def _derive_followup_offer(q: str, history: List[Dict[str, str]], data: Dict[str, Any]) -> tuple[str, str]:
+    question, query_text = _build_followup_offer_llm(q, history, data)
+    if question and query_text:
+        return question, query_text
+
+    question, query_text = _derive_followup_offer_fallback(q, history, data)
+    if _is_valid_followup_offer(question, query_text, q, bool(data.get("downloads"))) and _followup_offer_matches_scope(question, query_text, q, history, data):
+        return question, normalize_query_aliases(query_text)
+    return "", ""
+
+
+
+def _attach_followup_offer(data: Dict[str, Any], q: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
+    followup_question = str(data.get("followup_question", "") or "").strip()
+    followup_query = str(data.get("followup_query", "") or "").strip()
+    if followup_question and followup_query:
+        data["suppress_help_closing"] = True
+        return data
+
+    question, suggested_query = _derive_followup_offer(q, history, data)
+    if not question or not suggested_query:
+        return data
+    if _norm(suggested_query) == _norm(q):
+        return data
+
+    data["followup_question"] = question.strip()
+    data["followup_query"] = normalize_query_aliases(suggested_query.strip())
+    data["suppress_help_closing"] = True
+    return data
+
+
+
+def _finalize_with_followup(data: Dict[str, Any], user_query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
+    return finalize(_attach_followup_offer(dict(data), user_query, history), user_query=user_query)
+
+
 def _build_not_found_response(q: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
     scope = _describe_request_scope(q, history)
     if _wants_diverse_retrieval(q):
@@ -1920,6 +2549,8 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     data.setdefault("answer_md", "")
     data.setdefault("client_delay_ms", None)
     data.setdefault("suppress_help_closing", False)
+    data.setdefault("followup_question", "")
+    data.setdefault("followup_query", "")
 
     data["answer"] = strip_urls(str(data.get("answer", "")))
 
@@ -1936,23 +2567,45 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     else:
         data["answer_md"] = md
 
-    # Remove any questions per UX requirement
+    has_downloads = bool(data.get("downloads"))
+    data["answer"] = _remove_false_download_claims_text(str(data.get("answer", "")), has_downloads)
+    data["answer_md"] = _remove_false_download_claims_md(str(data.get("answer_md", "")), has_downloads)
+
+    followup_question = strip_urls(str(data.get("followup_question", "") or "")).strip()
+    if followup_question:
+        followup_question = re.sub(r"\s+", " ", followup_question).strip()
+        if not followup_question.endswith("?"):
+            followup_question = followup_question.rstrip(".! ") + "?"
+    data["followup_question"] = followup_question
+
+    followup_query = normalize_query_aliases(str(data.get("followup_query", "") or "").strip())
+    data["followup_query"] = followup_query if followup_question else ""
+
+    # Remove any questions from the main answer body; follow-up prompts are appended later.
     data["answer"] = remove_question_sentences(str(data.get("answer", "")))
     data["answer_md"] = remove_question_lines_md(str(data.get("answer_md", "")))
 
     # Add a dynamic closing only to shorter informational replies; long answers and download replies already feel complete.
     answer_text = str(data.get("answer", "") or "")
-    has_downloads = bool(data.get("downloads"))
-    if data.get("intent") != "unrelated" and not data.get("suppress_help_closing") and not has_downloads:
+    if (
+        data.get("intent") != "unrelated"
+        and not data.get("suppress_help_closing")
+        and not has_downloads
+        and not followup_question
+    ):
         if not has_help_closing(answer_text) and not has_help_closing(data.get("answer_md", "")):
             if len(answer_text) <= 220 and random.random() < 0.35:
                 closing = _build_dynamic_closing(user_query, answer_text, str(data.get("intent", "")))
                 if closing and closing not in data["answer"]:
                     data["answer"] = (data["answer"] + " " + closing).strip() if data["answer"] else closing
                 if closing and closing not in data["answer_md"]:
-                    data["answer_md"] = (data["answer_md"] + f"\n\n{closing}").strip() if data["answer_md"] else closing
+                    data["answer_md"] = (data["answer_md"] + "\n\n" + closing).strip() if data["answer_md"] else closing
 
-
+    if followup_question:
+        if followup_question not in data["answer"]:
+            data["answer"] = (data["answer"] + " " + followup_question).strip() if data["answer"] else followup_question
+        if followup_question not in data["answer_md"]:
+            data["answer_md"] = (data["answer_md"] + "\n\n" + followup_question).strip() if data["answer_md"] else followup_question
 
     return data
 
@@ -2138,7 +2791,8 @@ You write the greeting reply for Norbu, the AI assistant for Bhutan Insurance Li
 
 Write a short reply that:
 - greets the user naturally
-- makes it clear you can help with BIL topics like insurance, claims, loans, forms, contact details, branches, and annual reports
+- explicitly mentions that you can help with BIL insurance, loans, and provident funds every time
+- you may also mention claims, forms, contact details, branches, and annual reports
 - may lightly mention continuing a recent BIL topic if one is provided
 - sounds warm but not overly enthusiastic or canned
 - stays within 1-2 short sentences
@@ -2205,7 +2859,60 @@ STYLE GUIDANCE:
 )
 
 
+FOLLOWUP_OFFER_SYSTEM_TEMPLATE = """
+You write one follow-up question for Norbu, the Bhutan Insurance Limited (BIL) chatbot.
 
+Goal:
+- Ask the single most useful next question the user may want after the current answer.
+- Keep it grounded in the actual BIL topic already being discussed.
+- Make it specific to what has already been covered, and prefer a complementary next step instead of repeating the same angle.
+- Do not always default to documents, forms, downloads, or contact details.
+- If the answer already covered documents, forms, rates, coverage, exclusions, or steps, choose a different helpful angle when possible.
+- Never mention files, forms, or downloads unless they are genuinely relevant, and never say something is attached unless downloads are actually attached.
+- Prefer useful next angles like eligibility, coverage, exclusions, rates, steps, form, comparison, or key figures when they fit the topic.
+- Avoid generic prompts like "Would you like more details?" or "Anything else?"
+- Write one short yes/no style question in 8-18 words.
+- Also produce a standalone follow-up query that Norbu should run if the user answers yes.
+- The follow-up query must read like a normal user message, not an instruction to the assistant.
+- Prefer natural phrasings such as "what are...", "how do I...", "tell me about...", or "give me the form for...".
+- Do not start the follow-up query with verbs like "provide", "list", "describe", "outline", "summarize", or "explain".
+- The follow-up query must be explicit, self-contained, BIL-scoped, and must not use pronouns like it, this, that, these, or them.
+- If there is no strong next question, return empty strings.
+
+Return ONLY JSON matching this schema:
+{format_instructions}
+"""
+
+followup_offer_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", FOLLOWUP_OFFER_SYSTEM_TEMPLATE),
+        (
+            "human",
+            """CURRENT USER QUERY:
+{query}
+
+INTENT:
+{intent}
+
+CURRENT ANSWER:
+{answer}
+
+RECENT CHAT CONTEXT:
+{history_context}
+
+ACTIVE BIL TOPIC:
+{scope}
+
+DOWNLOADS ATTACHED:
+{downloads}
+""",
+        ),
+    ]
+).partial(format_instructions=followup_offer_parser.get_format_instructions())
+
+
+
+@lru_cache(maxsize=1)
 def _llm() -> ChatOpenAI:
     kwargs = {
         "model": settings.chat_model,
@@ -2218,6 +2925,7 @@ def _llm() -> ChatOpenAI:
     return ChatOpenAI(**kwargs)
 
 
+@lru_cache(maxsize=1)
 def _llm_plain() -> ChatOpenAI:
     kwargs = {
         "model": settings.chat_model,
@@ -2248,6 +2956,41 @@ def _message_content_to_text(content: Any) -> str:
                 parts.append(piece.strip())
         return " ".join(parts).strip()
     return str(content or "").strip()
+
+
+def _ensure_greeting_scope(text: str, recent_topic: str = "") -> str:
+    cleaned = re.sub(r"\s+", " ", strip_urls(text or "")).strip()
+    scope_sentence = (
+        "I can help with BIL insurance, loans, provident funds, claims, forms, branches, and reports."
+    )
+    if recent_topic:
+        scope_sentence = (
+            f"I can help with BIL insurance, loans, provident funds, and continue with {recent_topic}."
+        )
+
+    if not cleaned:
+        return f"Hello. {scope_sentence}"
+
+    lowered = _norm(cleaned)
+    has_insurance = "insurance" in lowered
+    has_loans = "loan" in lowered
+    has_pf = any(
+        term in lowered
+        for term in [
+            "provident fund",
+            "provident funds",
+            "private provident",
+            "ppf",
+            " pf ",
+        ]
+    ) or lowered.endswith(" pf") or lowered.startswith("pf ")
+
+    if has_insurance and has_loans and has_pf:
+        return cleaned
+
+    if cleaned.endswith((".", "!", "?")):
+        cleaned = cleaned.rstrip(".!?").strip()
+    return f"{cleaned}. {scope_sentence}"
 
 
 def _build_unrelated_llm_reply(query: str, history: List[Dict[str, str]]) -> str:
@@ -2286,16 +3029,17 @@ def _build_greeting_llm_reply(query: str, history: List[Dict[str, str]]) -> str:
         )
         out = llm.invoke(msgs)
         text = _message_content_to_text(getattr(out, "content", ""))
-        text = strip_urls(text)
-        text = re.sub(r"\s+", " ", text).strip()
+        text = _ensure_greeting_scope(text, recent_topic=recent_topic)
         text = re.sub(r"[?]+$", "", text).strip()
         if text and not text.startswith("{"):
             return text
     except Exception:
         pass
     if recent_topic:
-        return f"Hello. I can help with BIL topics, including continuing with {recent_topic}."
-    return "Hello. I can help with BIL insurance, claims, loans, forms, contact details, branches, and annual reports."
+        return (
+            f"Hello. I can help with BIL insurance, loans, provident funds, and continue with {recent_topic}."
+        )
+    return "Hello. I can help with BIL insurance, loans, provident funds, claims, forms, branches, and reports."
 
 
 
@@ -2421,7 +3165,9 @@ def _build_form_download_reply(query: str, history: List[Dict[str, str]], downlo
 # Main runner
 # =========================
 def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
-    raw_q = normalize_query_aliases((query or "").strip())
+    original_q = (query or "").strip()
+    raw_q = normalize_query_aliases(original_q)
+    raw_q = _resolve_affirmative_followup_query(raw_q, history)
     if not raw_q:
         return finalize({
             "intent": "not_found",
@@ -2430,6 +3176,18 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "downloads": [],
             "sources": [],
             "confidence": "low",
+        }, user_query=raw_q)
+
+    if _matches_easter_egg(original_q):
+        answer, answer_md = _build_easter_egg_reply()
+        return finalize({
+            "intent": "unrelated",
+            "answer": answer,
+            "answer_md": answer_md,
+            "downloads": [],
+            "sources": [],
+            "confidence": "high",
+            "suppress_help_closing": True,
         }, user_query=raw_q)
 
     # 0) Social intent
@@ -2489,7 +3247,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         except Exception:
             fin_obj = {}
         if isinstance(fin_obj, dict) and fin_obj.get("found"):
-            return finalize({
+            return _finalize_with_followup({
                 "intent": "bil_query",
                 "answer": str(fin_obj.get("answer", "") or ""),
                 "answer_md": str(fin_obj.get("answer_md", "") or fin_obj.get("answer", "")),
@@ -2497,7 +3255,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
                 "sources": [],
                 "confidence": "high",
                 "suppress_help_closing": True,
-            }, user_query=q)
+            }, user_query=q, history=history)
 
     # 1) Intent hint
     try:
@@ -2549,14 +3307,14 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
 
             downloads = merged[:4]
             form_reply = _build_form_download_reply(q, history, downloads)
-            return finalize({
+            return _finalize_with_followup({
                 "intent": "form_request",
                 "answer": str(form_reply.get("answer", "") or ""),
                 "answer_md": str(form_reply.get("answer_md", "") or ""),
                 "downloads": downloads,
                 "sources": [],
                 "confidence": "high",
-            }, user_query=q)
+            }, user_query=q, history=history)
 
         # Graceful fallback when no matching form exists
         if is_vague_form_request(q):
@@ -2604,14 +3362,15 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
                 continue
 
         if merged:
-            return finalize({
+            return _finalize_with_followup({
                 "intent": "bil_query",
                 "answer": "I found the requested document(s). You can download them below.",
                 "answer_md": "**I found the requested document(s).**\n\nYou can download them below.",
                 "downloads": merged[:6],
                 "sources": [],
                 "confidence": "high",
-            }, user_query=q)
+            }, user_query=q, history=history)
+
 
     # 3) Unrelated
     if hint == "unrelated":
@@ -2694,7 +3453,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             action_links,
             bool(merged_downloads),
         )
-        return finalize(parsed_obj, user_query=q)
+        return _finalize_with_followup(parsed_obj, user_query=q, history=history)
     except Exception:
         try:
             candidate = extract_first_json_object(out)
@@ -2709,20 +3468,20 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
                         action_links,
                         bool(merged_downloads),
                     )
-                    return finalize(obj, user_query=q)
+                    return _finalize_with_followup(obj, user_query=q, history=history)
         except Exception:
             pass
 
         fallback_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(out or "").strip(), flags=re.IGNORECASE | re.MULTILINE).strip()
         if fallback_text and not fallback_text.startswith("{"):
-            return finalize({
+            return _finalize_with_followup({
                 "intent": "bil_query",
                 "answer": fallback_text,
                 "answer_md": fallback_text,
                 "downloads": action_downloads,
                 "sources": [],
                 "confidence": "medium",
-            }, user_query=q)
+            }, user_query=q, history=history)
 
         return finalize({
             "intent": "not_found",

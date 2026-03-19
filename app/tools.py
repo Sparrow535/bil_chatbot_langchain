@@ -13,6 +13,7 @@ from app.text_utils import (
     looks_like_form_download_request,
     looks_like_document_download_request,
     clean_text,
+    normalize_bil_query_text,
 )
 
 FORMS_PATH = Path("data/forms.json")
@@ -574,7 +575,8 @@ def bil_retrieve_context(query: str) -> str:
     with _resource_lock:
         vectorstore = _vectorstore
 
-    qn = (query or "").lower()
+    query = normalize_bil_query_text(query or "")
+    qn = query.lower()
     fund_terms = {"ppf", "provident", "gratuity", "gf", "gfm", "private provident"}
     loan_rate_terms = {"interest rate", "interest rates", "loan rate", "loan rates", "rates"}
     loan_scope_terms = {
@@ -1142,7 +1144,7 @@ def bil_intent_hint(query: str) -> str:
     Lightweight intent hint to route quickly.
     Returns one of: form_request | bil_query | unrelated
     """
-    q = (query or "").lower()
+    q = normalize_bil_query_text(query or "").lower()
     q_clean = re.sub(r"[^\w\s/+-]", " ", q)
     q_clean = re.sub(r"\s+", " ", q_clean).strip()
 

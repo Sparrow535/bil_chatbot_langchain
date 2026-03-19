@@ -53,6 +53,8 @@ select {
   --chat-panel-width: clamp(320px, 27vw, 380px);
   --chat-panel-radius: 18px;
   --chat-panel-offset: calc(var(--chat-fab-size) + 12px);
+  --chat-panel-height-ratio: 65;
+  --chat-panel-height-cap: 640px;
   --chat-panel-max-height: calc(
     100vh - var(--chat-panel-offset) - (var(--chat-edge-gap) * 2)
   );
@@ -209,8 +211,8 @@ select {
   bottom: var(--chat-panel-offset);
   width: min(var(--chat-panel-width), calc(100vw - (var(--chat-edge-gap) * 2)));
   max-width: calc(100vw - (var(--chat-edge-gap) * 2));
-  height: min(640px, 76vh, var(--chat-panel-max-height));
-  height: min(640px, 76dvh, var(--chat-panel-max-height));
+  height: min(var(--chat-panel-height-cap), calc(var(--chat-panel-height-ratio) * 1vh), var(--chat-panel-max-height));
+  height: min(var(--chat-panel-height-cap), calc(var(--chat-panel-height-ratio) * 1dvh), var(--chat-panel-max-height));
   max-height: var(--chat-panel-max-height);
   background: var(--panel);
   border-radius: var(--chat-panel-radius);
@@ -334,6 +336,8 @@ select {
 }
 .msg-row.outgoing {
   justify-content: flex-end;
+  align-items: flex-end;
+  gap: 10px;
 }
 
 .msg-avatar {
@@ -350,6 +354,14 @@ select {
 .msg-avatar img {
   width: 100%;
   height: 100%;
+  object-fit: cover;
+}
+.user-avatar {
+  background: rgba(6, 88, 196, 0.08);
+  border: 1px solid rgba(6, 88, 196, 0.12);
+  box-shadow: 0 10px 22px rgba(6, 88, 196, 0.14);
+}
+.user-avatar img {
   object-fit: cover;
 }
 
@@ -955,21 +967,10 @@ select {
   }
 }
 
-@media (max-height: 860px) {
-  #chat-panel {
-    height: min(600px, 72vh, var(--chat-panel-max-height));
-    height: min(600px, 72dvh, var(--chat-panel-max-height));
-  }
-}
-
 @media (max-height: 720px) {
   #chat-widget {
     --chat-edge-gap: 12px;
     --chat-panel-offset: calc(var(--chat-fab-size) + 10px);
-  }
-  #chat-panel {
-    height: min(540px, 68vh, var(--chat-panel-max-height));
-    height: min(540px, 68dvh, var(--chat-panel-max-height));
   }
   .chat-teaser {
     width: min(250px, calc(100vw - (var(--chat-edge-gap) * 2)));
@@ -996,10 +997,6 @@ select {
     --chat-edge-gap: 14px;
     --chat-fab-size: 62px;
     --chat-panel-width: min(430px, calc(80vw - 28px));
-  }
-  #chat-panel {
-    height: min(600px, 76vh, var(--chat-panel-max-height));
-    height: min(600px, 76dvh, var(--chat-panel-max-height));
   }
   .chat-header {
     padding: 10px;
@@ -1050,15 +1047,13 @@ select {
       var(--chat-panel-width),
       calc(100vw - (var(--chat-edge-gap) * 2))
     );
-    height: min(520px, 68vh, var(--chat-panel-max-height));
-    height: min(520px, 68dvh, var(--chat-panel-max-height));
     max-height: var(--chat-panel-max-height);
     border-radius: var(--chat-panel-radius);
   }
   #chat-widget.kb-open #chat-panel {
     bottom: calc(var(--chat-edge-gap) + var(--kb-offset, 0px));
-    height: min(460px, 62vh, var(--chat-panel-max-height));
-    height: min(460px, 62dvh, var(--chat-panel-max-height));
+    height: min(560px, 72vh, var(--chat-panel-max-height));
+    height: min(560px, 72dvh, var(--chat-panel-max-height));
   }
   #chat-widget.kb-open #chat-fab,
   #chat-widget.kb-open .chat-teaser {
@@ -1125,10 +1120,6 @@ select {
     --chat-fab-size: 56px;
     --chat-panel-width: clamp(220px, 75vw, 280px);
   }
-  #chat-panel {
-    height: min(480px, 64vh, var(--chat-panel-max-height));
-    height: min(480px, 64dvh, var(--chat-panel-max-height));
-  }
   .chat-composer {
     padding: 6px;
   }
@@ -1149,5 +1140,43 @@ select {
   .pill-svg {
     width: 16px;
     height: 16px;
+  }
+}
+
+
+@media (max-height: 920px) {
+  #chat-widget {
+    --chat-panel-height-ratio: 70;
+    --chat-panel-height-cap: 680px;
+  }
+}
+
+@media (max-height: 820px) {
+  #chat-widget {
+    --chat-panel-height-ratio: 76;
+    --chat-panel-height-cap: 740px;
+  }
+}
+
+@media (max-height: 720px) {
+  #chat-widget {
+    --chat-panel-height-ratio: 83;
+    --chat-panel-height-cap: 800px;
+  }
+}
+
+@media (max-height: 620px) {
+  #chat-widget {
+    --chat-edge-gap: 10px;
+    --chat-panel-offset: calc(var(--chat-fab-size) + 8px);
+    --chat-panel-height-ratio: 88;
+    --chat-panel-height-cap: 860px;
+  }
+}
+
+@media (max-height: 540px) {
+  #chat-widget {
+    --chat-panel-height-ratio: 90;
+    --chat-panel-height-cap: 920px;
   }
 }

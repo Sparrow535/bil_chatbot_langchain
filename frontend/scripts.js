@@ -24,6 +24,11 @@
     const BOT_LOGO =
       GLOBAL_CONFIG.botLogo ||
       (ASSET_BASE ? `${ASSET_BASE}/assets/logo.svg` : "./assets/logo.svg");
+    const USER_AVATAR =
+      GLOBAL_CONFIG.userAvatar ||
+      (ASSET_BASE
+        ? `${ASSET_BASE}/assets/user-avatar.svg`
+        : "./assets/user-avatar.svg");
 
     // Typewriter speed
     const TYPE_MIN_DELAY = 6;
@@ -86,7 +91,7 @@
     // =====================
     // SESSION + HISTORY
     // =====================
-    let history = []; // [{role:"user"|"assistant", content:"..."}]
+    let history = []; // [{role:"user"|"assistant", content:"...", followup_query?:"..."}]
 
     let sessionId = localStorage.getItem("bil_session_id");
     if (!sessionId) {
@@ -376,8 +381,17 @@
         bubble = document.createElement("div");
         bubble.className = "bubble";
 
+        const avatar = document.createElement("div");
+        avatar.className = "msg-avatar user-avatar";
+
+        const img = document.createElement("img");
+        img.src = USER_AVATAR;
+        img.alt = "User";
+        avatar.appendChild(img);
+
         wrap.appendChild(bubble);
         row.appendChild(wrap);
+        row.appendChild(avatar);
       }
 
       messagesEl.appendChild(row);
@@ -412,6 +426,7 @@
     async function ensureIntroMessage() {
       if (messagesEl.childElementCount > 0 || introGreetingInFlight) return;
       introGreetingInFlight = true;
+      setAssistantBusy(true);
       if (statusEl) statusEl.textContent = "Online";
 
       const { row: typingRow } = addTypingBubble();
@@ -446,6 +461,7 @@
         console.error(err);
       } finally {
         introGreetingInFlight = false;
+        setAssistantBusy(false);
       }
     }
 
@@ -865,7 +881,15 @@
 
         const plainAnswer =
           data && data.answer ? String(data.answer) : stripMarkdown(md);
-        history.push({ role: "assistant", content: plainAnswer });
+        const followupQuery =
+          data && typeof data.followup_query === "string"
+            ? data.followup_query.trim()
+            : "";
+        history.push({
+          role: "assistant",
+          content: plainAnswer,
+          followup_query: followupQuery || undefined,
+        });
 
         if (
           data &&

@@ -4,6 +4,7 @@ from typing import List, Literal, Optional, Dict, Any
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
+    followup_query: Optional[str] = None
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
@@ -27,6 +28,7 @@ class BotResponse(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
     debug: Optional[Dict[str, Any]] = None
     client_delay_ms: Optional[int] = None
+    followup_query: Optional[str] = None
 
 class GreetingResponse(BaseModel):
     answer: str
