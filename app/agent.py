@@ -200,12 +200,6 @@ _IDENTITY_PATTERNS = [
     re.compile(r"^(who am i chatting with|who am i talking to)$", re.IGNORECASE),
     re.compile(r"^(what can you do|how can you help|what do you do)$", re.IGNORECASE),
 ]
-_EASTER_EGG_TRIGGER = "/dev"
-_EASTER_EGG_REPLY = """A rare line to uncover.
-
-**Norbu** was designed and built by **ULTRA** for **Bhutan Insurance Limited**.
-
-Built quietly behind the interface - shaped with care, patience, and precision."""
 
 _TOPIC_PREFIX_RE = re.compile(
     r"^(tell me about|tell me more about|tell me|explain|describe|what is|what are|"
@@ -280,23 +274,6 @@ def detect_social_intent(q: str) -> Optional[str]:
         return "identity"
     return None
 
-
-def _normalize_secret_text(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
-
-
-def _matches_easter_egg(query: str) -> bool:
-    trigger = _normalize_secret_text(_EASTER_EGG_TRIGGER)
-    if not trigger:
-        return False
-    return _normalize_secret_text(query) == trigger
-
-
-def _build_easter_egg_reply() -> tuple[str, str]:
-    answer = strip_urls(_EASTER_EGG_REPLY).strip()
-    if not answer:
-        answer = "Norbu was created with care for Bhutan Insurance Limited."
-    return answer, repair_markdown_from_text(answer)
 
 
 def build_identity_reply(q: str) -> tuple[str, str]:
@@ -3165,8 +3142,7 @@ def _build_form_download_reply(query: str, history: List[Dict[str, str]], downlo
 # Main runner
 # =========================
 def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
-    original_q = (query or "").strip()
-    raw_q = normalize_query_aliases(original_q)
+    raw_q = normalize_query_aliases((query or "").strip())
     raw_q = _resolve_affirmative_followup_query(raw_q, history)
     if not raw_q:
         return finalize({
@@ -3178,17 +3154,6 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "confidence": "low",
         }, user_query=raw_q)
 
-    if _matches_easter_egg(original_q):
-        answer, answer_md = _build_easter_egg_reply()
-        return finalize({
-            "intent": "unrelated",
-            "answer": answer,
-            "answer_md": answer_md,
-            "downloads": [],
-            "sources": [],
-            "confidence": "high",
-            "suppress_help_closing": True,
-        }, user_query=raw_q)
 
     # 0) Social intent
     social = detect_social_intent(raw_q)

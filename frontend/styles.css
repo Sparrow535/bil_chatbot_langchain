@@ -340,6 +340,12 @@ select {
   gap: 10px;
 }
 
+.msg-row.incoming .msg-avatar {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+}
+
 .msg-avatar {
   width: 30px;
   height: 30px;
@@ -1084,6 +1090,11 @@ select {
     max-width: 90%;
     font-size: 12.5px;
     padding: 9px 10px;
+  }
+  .msg-row.incoming .msg-avatar {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
   }
   .msg-avatar {
     width: 24px;

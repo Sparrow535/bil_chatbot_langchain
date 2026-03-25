@@ -93,10 +93,62 @@
     // =====================
     let history = []; // [{role:"user"|"assistant", content:"...", followup_query?:"..."}]
 
-    let sessionId = localStorage.getItem("bil_session_id");
+    const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+    const SESSION_ID_KEY = "bil_session_id";
+    const SESSION_LAST_SEEN_KEY = "bil_session_last_seen";
+
+    function createSessionId() {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") {
+        return window.crypto.randomUUID();
+      }
+      return `bil-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function persistSessionId(nextId) {
+      sessionId = nextId;
+      localStorage.setItem(SESSION_ID_KEY, nextId);
+    }
+
+    function touchSessionActivity() {
+      localStorage.setItem(SESSION_LAST_SEEN_KEY, String(Date.now()));
+    }
+
+    function hasSessionExpired() {
+      const raw = localStorage.getItem(SESSION_LAST_SEEN_KEY);
+      if (!raw) return false;
+      const lastSeen = Number(raw);
+      if (!Number.isFinite(lastSeen) || lastSeen <= 0) return false;
+      return Date.now() - lastSeen > SESSION_TIMEOUT_MS;
+    }
+
+    function resetSessionState({ clearThread = false } = {}) {
+      history = [];
+      introGreetingInFlight = false;
+      persistSessionId(createSessionId());
+      touchSessionActivity();
+      if (clearThread && messagesEl) {
+        messagesEl.innerHTML = "";
+      }
+      if (statusEl) statusEl.textContent = "Online";
+      showHint("");
+      setAssistantBusy(false);
+    }
+
+    function ensureActiveSession({ clearThread = false } = {}) {
+      if (hasSessionExpired()) {
+        resetSessionState({ clearThread });
+        return true;
+      }
+      touchSessionActivity();
+      return false;
+    }
+
+    let sessionId = localStorage.getItem(SESSION_ID_KEY);
     if (!sessionId) {
-      sessionId = crypto.randomUUID();
-      localStorage.setItem("bil_session_id", sessionId);
+      persistSessionId(createSessionId());
+    }
+    if (!localStorage.getItem(SESSION_LAST_SEEN_KEY)) {
+      touchSessionActivity();
     }
 
     // =====================
@@ -330,22 +382,10 @@
     function refreshTeaserCopy() {
       if (!teaserTitle) return;
 
-      const starterLines = [
-        "Need help with BIL?",
-        "Ask about claims.",
-        "Need a form?",
-        "Ask about loans.",
-        "Need policy details?",
-        "Need a quick answer?",
-      ];
-
-      const lines = history.length ? getRecentTopicTeaserLines() : starterLines;
-      teaserTitle.textContent = pickTeaserLine(lines);
+      teaserTitle.textContent = "How can I help you today?";
 
       if (teaserSubtitle) {
-        teaserSubtitle.textContent = history.length
-          ? "Norbu · AI Assistant · Ready"
-          : "Norbu · AI Assistant · Online";
+        teaserSubtitle.textContent = "Norbu · AI Assistant · Online";
       }
     }
 
@@ -420,10 +460,13 @@
         const txt = await res.text();
         throw new Error(txt || `HTTP ${res.status}`);
       }
-      return await res.json();
+      const data = await res.json();
+      touchSessionActivity();
+      return data;
     }
 
     async function ensureIntroMessage() {
+      ensureActiveSession({ clearThread: true });
       if (messagesEl.childElementCount > 0 || introGreetingInFlight) return;
       introGreetingInFlight = true;
       setAssistantBusy(true);
@@ -806,7 +849,9 @@
         const txt = await res.text();
         throw new Error(txt || `HTTP ${res.status}`);
       }
-      return await res.json();
+      const data = await res.json();
+      touchSessionActivity();
+      return data;
     }
 
     async function transcribeAudio(blob) {
@@ -824,7 +869,9 @@
         const txt = await res.text();
         throw new Error(txt || `HTTP ${res.status}`);
       }
-      return await res.json(); // {text:"..."}
+      const data = await res.json(); // {text:"..."}
+      touchSessionActivity();
+      return data;
     }
 
     // =====================
@@ -835,6 +882,7 @@
 
       const text = normalizeOutgoingText(messageOverride);
       if (!text) return;
+      ensureActiveSession({ clearThread: true });
       const usedOverrideText =
         typeof messageOverride === "string" && messageOverride.trim() === text;
 
