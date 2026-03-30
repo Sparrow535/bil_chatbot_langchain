@@ -1092,9 +1092,7 @@ _UNRELATED_ACK_TEMPLATES = {
     ],
 }
 _UNRELATED_REDIRECTS = [
-    "I can help with BIL insurance products, claims, loans, forms, contact details, and annual reports.",
-    "I can help with Bhutan Insurance Limited services like insurance, claims, loans, forms, branches, contacts, and reports.",
-    "I can help with BIL policy information, claim processes, loan products, forms, contacts, and annual-report details.",
+    "I’m here to assist with Bhutan Insurance Limited (BIL) services such as insurance, credit management (loans), and fund management (provident fund). Please let me know how I can help you with these services.",
 ]
 
 
@@ -1136,6 +1134,8 @@ def bil_unrelated_reply(user_query: str) -> str:
     ack_options = _UNRELATED_ACK_TEMPLATES.get(category) or _UNRELATED_ACK_TEMPLATES["generic"]
     ack = random.choice(ack_options).format(subject=subject)
     redirect = random.choice(_UNRELATED_REDIRECTS)
+    if not ack.lower().startswith("thank you for your message"):
+        ack = f"Thank you for your message. {ack}"
     return f"{ack} {redirect}"
 
 @tool

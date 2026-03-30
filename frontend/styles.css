@@ -141,6 +141,10 @@ select {
   font-size: 11px;
   color: rgba(0, 0, 0, 0.55);
 }
+.teaser-online {
+  color: #1f9d55;
+  font-weight: 600;
+}
 
 #chat-fab {
   width: var(--chat-fab-size);
@@ -287,7 +291,8 @@ select {
 
 .bot-status {
   font-size: 12px;
-  color: var(--muted);
+  color: #1f9d55;
+  font-weight: 600;
   margin-top: 2px;
 }
 

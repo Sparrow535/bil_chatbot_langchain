@@ -332,13 +332,7 @@
     }
 
     function getRandomGreeting() {
-      const base = getGreeting();
-      const options = [
-        `${base}! I’m Norbu, here to help with BIL insurance, claims, loans, and forms.`,
-        `${base}! I’m your BIL assistant. I can help with insurance, claims, loans, and forms.`,
-        `${base}! I’m here to help with BIL questions and support.`,
-      ];
-      return options[Math.floor(Math.random() * options.length)];
+      return "Hello! I am the official chatbot for Bhutan Insurance Limited (BIL), here to assist you with information about the company and its services, including insurance, credit management (loans), and fund management (provident fund).";
     }
 
     function pickTeaserLine(pool) {
@@ -382,10 +376,10 @@
     function refreshTeaserCopy() {
       if (!teaserTitle) return;
 
-      teaserTitle.textContent = "How can I help you today?";
+      teaserTitle.textContent = "Kuzuzangpo la! How may I assist you today?";
 
       if (teaserSubtitle) {
-        teaserSubtitle.textContent = "Norbu · AI Assistant · Online";
+        teaserSubtitle.innerHTML = 'Norbu AI Assistant <span class="teaser-online">• Online</span>';
       }
     }
 

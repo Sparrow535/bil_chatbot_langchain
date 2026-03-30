@@ -192,7 +192,8 @@ _GREETING_SINGLE_WORDS = {"hello", "hi", "hey", "hola", "greetings", "namaste", 
 _GREETING_PATTERNS = [
     re.compile(r"^(hello|hi|hey|hola|greetings|namaste|good morning|good afternoon|good evening|kuzuzangpo|kuzuzangpo la|kuzuzangpola|kuzu)(\s+norbu)?$", re.IGNORECASE),
 ]
-_FAREWELLS = {"bye", "goodbye", "see you", "see ya", "take care", "later", "okay", "ok"}
+_FAREWELLS = {"bye", "goodbye", "see you", "see ya", "take care", "later"}
+_OKAYS = {"okay", "ok"}
 _THANKS = {"thanks", "thank you", "thx", "thanks a lot", "appreciate it"}
 _IDENTITY_PATTERNS = [
     re.compile(r"^(who are you|what are you|tell me about yourself|introduce yourself)$", re.IGNORECASE),
@@ -200,6 +201,16 @@ _IDENTITY_PATTERNS = [
     re.compile(r"^(who am i chatting with|who am i talking to)$", re.IGNORECASE),
     re.compile(r"^(what can you do|how can you help|what do you do)$", re.IGNORECASE),
 ]
+_KEYBOARD_SMASH_RE = re.compile(r"(?:asdf|sdfg|dfgh|fghj|ghjk|hjkl|qwer|wert|erty|rtyu|tyui|uiop|zxcv|xcvb|cvbn|vbnm)", re.IGNORECASE)
+_COMMON_MEANINGFUL_TOKENS = {
+    "what", "when", "where", "which", "who", "why", "how", "help", "details", "detail",
+    "more", "info", "information", "document", "documents", "form", "forms", "download",
+    "policy", "policies", "coverage", "benefits", "contact", "branch", "branches", "office",
+    "report", "reports", "annual", "income", "claim", "claims", "insurance", "loan", "loans",
+    "fund", "funds", "provident", "travel", "motor", "fire", "housing", "rates", "rate"
+}
+_NOT_UNDERSTOOD_REPLY = "I’m sorry, I didn’t quite understand your request. Could you please rephrase your question or provide more details? I’ll do my best to assist you."
+_GREETING_REPLY = "Hello! Welcome to Bhutan Insurance Limited (BIL). How may I assist you today?"
 
 _TOPIC_PREFIX_RE = re.compile(
     r"^(tell me about|tell me more about|tell me|explain|describe|what is|what are|"
@@ -268,12 +279,87 @@ def detect_social_intent(q: str) -> Optional[str]:
         return "greeting"
     if qn in _FAREWELLS:
         return "farewell"
+    if qn in _OKAYS:
+        return "okay"
     if qn in _THANKS:
         return "thanks"
     if any(p.search(qn) for p in _IDENTITY_PATTERNS):
         return "identity"
     return None
 
+
+
+def _max_consonant_run(token: str) -> int:
+    run = 0
+    best = 0
+    for ch in token:
+        if ch in "aeiouy":
+            run = 0
+        else:
+            run += 1
+            best = max(best, run)
+    return best
+
+
+
+def _token_looks_unintelligible(token: str) -> bool:
+    tok = re.sub(r"[^a-z]", "", (token or "").lower())
+    if not tok:
+        return False
+    if tok in {"pf", "ppf", "gf", "gfm", "bil"}:
+        return False
+    if tok in _COMMON_MEANINGFUL_TOKENS:
+        return False
+    if tok.isdigit():
+        return False
+
+    vowel_count = sum(ch in "aeiouy" for ch in tok)
+    consonant_run = _max_consonant_run(tok)
+    vowel_ratio = vowel_count / max(1, len(tok))
+
+    if len(tok) <= 1:
+        return True
+    if len(tok) == 2:
+        return True
+    if _KEYBOARD_SMASH_RE.search(tok):
+        return True
+    if len(tok) >= 4 and consonant_run >= 4:
+        return True
+    if len(tok) >= 4 and vowel_ratio <= 0.25 and consonant_run >= 3:
+        return True
+    if len(tok) >= 6 and vowel_count <= 1:
+        return True
+    if len(tok) >= 6 and len(set(tok)) <= 3:
+        return True
+    return False
+
+
+
+def _looks_unintelligible_query(q: str) -> bool:
+    qn = _norm(q)
+    if not qn:
+        return False
+    if has_explicit_bil_topic(qn):
+        return False
+    if looks_like_form_request(qn) or looks_like_form_download_request(qn) or looks_like_document_download_request(qn):
+        return False
+
+    tokens = qn.split()
+    if not tokens:
+        return False
+
+    token_set = set(tokens)
+    social_tokens = _GREETINGS | _FAREWELLS | _THANKS | _OKAYS
+    if token_set & social_tokens:
+        return False
+
+    if len(tokens) == 1:
+        return _token_looks_unintelligible(tokens[0])
+
+    if len(tokens) <= 3 and all(_token_looks_unintelligible(tok) for tok in tokens):
+        return True
+
+    return False
 
 
 def build_identity_reply(q: str) -> tuple[str, str]:
@@ -2450,29 +2536,10 @@ def _finalize_with_followup(data: Dict[str, Any], user_query: str, history: List
 
 
 def _build_not_found_response(q: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
-    scope = _describe_request_scope(q, history)
-    if _wants_diverse_retrieval(q):
-        subject = scope or "that BIL topic"
-        answer = (
-            f"I couldn’t pull a reliable full overview of {subject} from the indexed BIL content yet. "
-            "If you narrow it to one product, coverage area, rate, or report year, I can answer more precisely."
-        )
-    elif should_bind_to_recent_topic(q, history):
-        subject = scope or "that follow-up"
-        answer = (
-            f"I couldn’t pull enough indexed detail for {subject} yet. "
-            "If you repeat the product or report name in the request, I can narrow it better."
-        )
-    elif scope:
-        answer = (
-            f"I couldn’t pull enough indexed detail for {scope} yet. "
-            "If you ask for a specific part like coverage, documents, process, rates, or the form, I can narrow it better."
-        )
-    else:
-        answer = (
-            "I couldn’t pull enough indexed detail for that request yet. "
-            "If you mention the product, form, or report year, I can narrow it better."
-        )
+    answer = (
+        "Thank you for your question. I’m sorry, but I don’t have that information at the moment. "
+        "Please contact our office for further assistance, or let me know if I can help you with something else."
+    )
     return {
         "intent": "not_found",
         "answer": answer,
@@ -2558,14 +2625,15 @@ def finalize(data: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     followup_query = normalize_query_aliases(str(data.get("followup_query", "") or "").strip())
     data["followup_query"] = followup_query if followup_question else ""
 
-    # Remove any questions from the main answer body; follow-up prompts are appended later.
-    data["answer"] = remove_question_sentences(str(data.get("answer", "")))
-    data["answer_md"] = remove_question_lines_md(str(data.get("answer_md", "")))
+    # Remove embedded questions only for normal informational replies; keep not_found/unrelated wording intact.
+    if data.get("intent") not in {"not_found", "unrelated"}:
+        data["answer"] = remove_question_sentences(str(data.get("answer", "")))
+        data["answer_md"] = remove_question_lines_md(str(data.get("answer_md", "")))
 
     # Add a dynamic closing only to shorter informational replies; long answers and download replies already feel complete.
     answer_text = str(data.get("answer", "") or "")
     if (
-        data.get("intent") != "unrelated"
+        data.get("intent") == "bil_query"
         and not data.get("suppress_help_closing")
         and not has_downloads
         and not followup_question
@@ -2764,14 +2832,12 @@ FORM CONTEXT:
 
 
 GREETING_SYSTEM_TEMPLATE = """
-You write the greeting reply for Norbu, the AI assistant for Bhutan Insurance Limited (BIL).
+You write greeting replies for Norbu, the official chatbot of Bhutan Insurance Limited (BIL).
 
-Write a short reply that:
-- greets the user naturally
-- explicitly mentions that you can help with BIL insurance, loans, and provident funds every time
-- you may also mention claims, forms, contact details, branches, and annual reports
-- may lightly mention continuing a recent BIL topic if one is provided
-- sounds warm but not overly enthusiastic or canned
+Write one short reply that:
+- welcomes the user politely
+- clearly says this is Bhutan Insurance Limited (BIL)
+- offers help with insurance, credit management (loans), and fund management (provident fund)
 - stays within 1-2 short sentences
 - uses no bullets, no markdown headings, no links, and no question at the end
 """
@@ -2804,12 +2870,11 @@ You are the official website chatbot for Bhutan Insurance Limited (BIL).
 The user's latest message is outside the scope of BIL support.
 
 Write a short reply that:
-- acknowledges what the user is asking about in the first sentence
-- clearly says you cannot help with that specific topic here
+- briefly acknowledges the user's message in the first sentence
+- clearly says you are here to assist with Bhutan Insurance Limited (BIL) services such as insurance, credit management (loans), and fund management (provident fund)
 - does NOT answer the unrelated question itself
-- naturally redirects to the BIL topics you can help with: insurance products, claims, loans, forms, contact details, branches, and annual reports
-- if a recent BIL topic is provided, you may mention it as something you can continue helping with
-- sounds natural and varied, not canned
+- ends by inviting the user to ask about those BIL services
+- may lightly mention a recent BIL topic if one is provided
 - stays within 2-3 sentences
 - uses no bullets, no markdown headings, no links, and no question at the end
 """
@@ -3021,8 +3086,11 @@ def _build_greeting_llm_reply(query: str, history: List[Dict[str, str]]) -> str:
 
 
 def build_start_greeting(history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    history = list(history or [])
-    greeting = _build_greeting_llm_reply("hello", history)
+    greeting = (
+        "Hello! I am the official chatbot for Bhutan Insurance Limited (BIL), here to assist you with information "
+        "about the company and its services, including insurance, credit management (loans), and fund management "
+        "(provident fund)."
+    )
     return finalize(
         {
             "intent": "unrelated",
@@ -3158,7 +3226,7 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
     # 0) Social intent
     social = detect_social_intent(raw_q)
     if social == "greeting":
-        greeting = _build_greeting_llm_reply(raw_q, history)
+        greeting = _GREETING_REPLY
         return finalize({
             "intent": "unrelated",
             "answer": greeting,
@@ -3170,10 +3238,11 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         }, user_query=raw_q)
 
     if social == "thanks":
+        answer = "You’re most welcome! If you need any further assistance, feel free to ask. I’m here to help!"
         return finalize({
             "intent": "unrelated",
-            "answer": "You’re welcome! Let me know if you need anything else.",
-            "answer_md": "You’re welcome!\n\nIf you need help with insurance, loans, or forms, just ask.",
+            "answer": answer,
+            "answer_md": repair_markdown_from_text(answer),
             "downloads": [],
             "sources": [],
             "confidence": "high",
@@ -3181,10 +3250,23 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         }, user_query=raw_q)
 
     if social == "farewell":
+        answer = "Thank you for chatting with us. We’re always here to help. Have a wonderful day ahead!"
         return finalize({
             "intent": "unrelated",
-            "answer": "Goodbye! Have a great day.",
-            "answer_md": "Goodbye!\n\nHave a great day.",
+            "answer": answer,
+            "answer_md": repair_markdown_from_text(answer),
+            "downloads": [],
+            "sources": [],
+            "confidence": "high",
+            "client_delay_ms": 1500,
+        }, user_query=raw_q)
+
+    if social == "okay":
+        answer = "Great! Please let me know if there’s anything else I can assist you with."
+        return finalize({
+            "intent": "unrelated",
+            "answer": answer,
+            "answer_md": repair_markdown_from_text(answer),
             "downloads": [],
             "sources": [],
             "confidence": "high",
@@ -3201,6 +3283,17 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
             "sources": [],
             "confidence": "high",
             "client_delay_ms": 1500,
+        }, user_query=raw_q)
+
+    if _looks_unintelligible_query(raw_q):
+        return finalize({
+            "intent": "not_found",
+            "answer": _NOT_UNDERSTOOD_REPLY,
+            "answer_md": repair_markdown_from_text(_NOT_UNDERSTOOD_REPLY),
+            "downloads": [],
+            "sources": [],
+            "confidence": "low",
+            "client_delay_ms": 1200,
         }, user_query=raw_q)
 
     q = contextualize_query_from_history(raw_q, history)
@@ -3448,10 +3541,11 @@ def run_agent(query: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
                 "confidence": "medium",
             }, user_query=q, history=history)
 
+        answer = _NOT_UNDERSTOOD_REPLY
         return finalize({
             "intent": "not_found",
-            "answer": "I couldn’t process that. Please try again.",
-            "answer_md": "I couldn’t process that. Please try again.",
+            "answer": answer,
+            "answer_md": repair_markdown_from_text(answer),
             "downloads": [],
             "sources": [],
             "confidence": "low",
