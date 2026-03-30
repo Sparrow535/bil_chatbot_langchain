@@ -379,7 +379,7 @@
       teaserTitle.textContent = "Kuzuzangpo la! How may I assist you today?";
 
       if (teaserSubtitle) {
-        teaserSubtitle.innerHTML = '<span class="teaser-online">Online</span>';
+        teaserSubtitle.textContent = "";
       }
     }
 

@@ -49,7 +49,7 @@ select {
     -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   --chat-font: var(--font);
   --chat-edge-gap: clamp(10px, 1.4vw, 18px);
-  --chat-fab-size: clamp(58px, 5vw, 68px);
+  --chat-fab-size: clamp(50px, 4.4vw, 60px);
   --chat-panel-width: clamp(320px, 27vw, 380px);
   --chat-panel-radius: 18px;
   --chat-panel-offset: calc(var(--chat-fab-size) + 12px);
@@ -101,8 +101,9 @@ select {
 }
 .teaser-close {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
   width: 22px;
   height: 22px;
   border: none;
@@ -114,13 +115,17 @@ select {
 }
 .teaser-row {
   display: grid;
-  grid-template-columns: 32px 1fr;
+  grid-template-columns: 26px 1fr;
   gap: 15px;
   align-items: center;
 }
+.teaser-content {
+  min-width: 0;
+  padding-right: 22px;
+}
 .teaser-avatar {
-  width: 42px;
-  height: 42px;
+  width: 38px;
+  height: 38px;
   border-radius: 999px;
   overflow: hidden;
   background: #fff;
@@ -177,19 +182,19 @@ select {
 }
 
 .fab-image {
-  width: 46px;
-  height: 46px;
+  width: 40px;
+  height: 40px;
   display: block;
 }
 
 /* Allow different icon sizes for open vs close */
 #chat-fab.fab-open .fab-image {
-  width: 46px;
-  height: 46px;
+  width: 40px;
+  height: 40px;
 }
 #chat-fab.fab-close .fab-image {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
 }
 
 .fab-badge {
@@ -215,8 +220,16 @@ select {
   bottom: var(--chat-panel-offset);
   width: min(var(--chat-panel-width), calc(100vw - (var(--chat-edge-gap) * 2)));
   max-width: calc(100vw - (var(--chat-edge-gap) * 2));
-  height: min(var(--chat-panel-height-cap), calc(var(--chat-panel-height-ratio) * 1vh), var(--chat-panel-max-height));
-  height: min(var(--chat-panel-height-cap), calc(var(--chat-panel-height-ratio) * 1dvh), var(--chat-panel-max-height));
+  height: min(
+    var(--chat-panel-height-cap),
+    calc(var(--chat-panel-height-ratio) * 1vh),
+    var(--chat-panel-max-height)
+  );
+  height: min(
+    var(--chat-panel-height-cap),
+    calc(var(--chat-panel-height-ratio) * 1dvh),
+    var(--chat-panel-max-height)
+  );
   max-height: var(--chat-panel-max-height);
   background: var(--panel);
   border-radius: var(--chat-panel-radius);
@@ -1006,7 +1019,7 @@ select {
 @media (max-width: 768px) {
   #chat-widget {
     --chat-edge-gap: 14px;
-    --chat-fab-size: 62px;
+    --chat-fab-size: 52px;
     --chat-panel-width: min(430px, calc(80vw - 28px));
   }
   .chat-header {
@@ -1044,7 +1057,7 @@ select {
 @media (max-width: 480px) {
   #chat-widget {
     --chat-edge-gap: 10px;
-    --chat-fab-size: 58px;
+    --chat-fab-size: 54px;
     --chat-panel-width: clamp(240px, 75vw, 320px);
     --chat-panel-radius: 16px;
     --chat-panel-offset: calc(var(--chat-fab-size) + 10px);
@@ -1122,18 +1135,18 @@ select {
     height: 30px;
   }
   #chat-fab.fab-open .fab-image {
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
   }
   #chat-fab.fab-close .fab-image {
-    width: 24px;
-    height: 24px;
+    width: 22px;
+    height: 22px;
   }
 }
 
 @media (max-width: 360px) {
   #chat-widget {
-    --chat-fab-size: 56px;
+    --chat-fab-size: 52px;
     --chat-panel-width: clamp(220px, 75vw, 280px);
   }
   .chat-composer {
@@ -1158,7 +1171,6 @@ select {
     height: 16px;
   }
 }
-
 
 @media (max-height: 920px) {
   #chat-widget {
