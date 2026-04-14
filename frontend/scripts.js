@@ -23,7 +23,7 @@
       (API_BASE ? `${API_BASE}/greeting` : "/greeting");
     const BOT_LOGO =
       GLOBAL_CONFIG.botLogo ||
-      (ASSET_BASE ? `${ASSET_BASE}/assets/logo.svg` : "./assets/logo.svg");
+      (ASSET_BASE ? `${ASSET_BASE}/assets/logo.png` : "./assets/logo.png");
     const USER_AVATAR =
       GLOBAL_CONFIG.userAvatar ||
       (ASSET_BASE

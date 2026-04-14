@@ -49,7 +49,7 @@ select {
     -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   --chat-font: var(--font);
   --chat-edge-gap: clamp(10px, 1.4vw, 18px);
-  --chat-fab-size: clamp(50px, 4.4vw, 60px);
+  --chat-fab-size: clamp(45px, 4.4vw, 55px);
   --chat-panel-width: clamp(320px, 27vw, 380px);
   --chat-panel-radius: 18px;
   --chat-panel-offset: calc(var(--chat-fab-size) + 12px);
@@ -86,7 +86,7 @@ select {
 .chat-teaser::after {
   content: "";
   position: absolute;
-  right: 28px;
+  right: calc((var(--chat-fab-size) / 2) - 9px);
   bottom: -10px;
   width: 18px;
   height: 18px;
@@ -182,8 +182,8 @@ select {
 }
 
 .fab-image {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   display: block;
 }
 
@@ -369,9 +369,6 @@ select {
   height: 30px;
   border-radius: 999px;
   overflow: hidden;
-  background: #fff;
-  border: 1px solid var(--border);
-  box-shadow: 0 6px 14px rgba(24, 119, 242, 0.12);
   flex: 0 0 30px;
   margin-top: 4px;
 }

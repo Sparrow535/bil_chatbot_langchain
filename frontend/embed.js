@@ -7,7 +7,9 @@
     (scriptTag && scriptTag.getAttribute(name)) || fallback;
 
   const src = scriptTag && scriptTag.src ? new URL(scriptTag.src) : null;
-  const baseFromScript = src ? `${src.origin}${src.pathname.replace(/\/[^/]+$/, "")}` : "";
+  const baseFromScript = src
+    ? `${src.origin}${src.pathname.replace(/\/[^/]+$/, "")}`
+    : "";
 
   const assetBase = fromAttr("data-asset-base", baseFromScript);
   const apiBase = fromAttr("data-api-base", baseFromScript);
@@ -125,7 +127,10 @@
       apiBase,
       assetBase,
       botName: fromAttr("data-bot-name", "Norbu"),
-      botLogo: fromAttr("data-bot-logo", assetBase ? `${assetBase}/assets/logo.svg` : "./assets/logo.svg"),
+      botLogo: fromAttr(
+        "data-bot-logo",
+        assetBase ? `${assetBase}/assets/logo.png` : "./assets/logo.png",
+      ),
     };
 
     ensureCss(shadow);
